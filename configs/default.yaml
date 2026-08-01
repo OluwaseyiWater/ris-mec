@@ -1,0 +1,86 @@
+# =============================================================================
+#  RIS-MEC HDRL — all simulation parameters.
+#  Every experiment reads from a config; nothing is hard-coded in the physics.
+# =============================================================================
+
+system:
+  K: 6                 # number of single-antenna UEs (physical-AI devices)
+  N: 128               # number of RIS elements
+  G: 8                 # number of RIS groups (N must be divisible by G)
+  tau: 0.01            # slot duration [s] (10 ms)
+  max_steps: 200       # slots per episode
+
+bandwidth:
+  B_total: 20.0e6      # total system bandwidth [Hz]
+  noise_psd_dbm_hz: -174.0   # thermal noise PSD [dBm/Hz]
+  noise_figure_db: 7.0       # receiver noise figure [dB]
+
+power:
+  Pk_ul_max: 0.2       # per-UE uplink transmit power cap [W] (23 dBm)
+  Pbs_dl_max: 5.0      # BS downlink transmit power cap [W]
+  # --- Active-RIS power model ---
+  ris_static_pc: 1.0e-3    # p_c: static/bias power per element [W]
+  ris_amp_pa: 5.0e-3       # p_a: dynamic amplification coefficient [W]
+  ris_power_budget: 2.0    # P_RIS_max: total RIS power budget [W]
+  ris_amp_max: 6.0         # a_g upper bound (max amplitude gain, >1 = amplify)
+  ris_out_power_max: 0.05  # P_out,max: per-element output-power cap [W] 
+
+active_ris:
+  sigma_ris_psd_dbm_hz: -160.0   # active-RIS amplifier noise PSD [dBm/Hz] (~14 dB above thermal)
+  enable_amplification: true
+  a_init: 2.0                    # default group amplitude gain when strategist not set
+
+geometry:                  # reference-distance pathloss geometry (meters), RIS-standard
+  fc_ghz: 3.5              # carrier frequency [GHz]
+  pl0_db: 30.0             # pathloss at reference distance d0=1 m [dB]
+  exponent_ris: 2.2        # pathloss exponent for near-LoS RIS links (UE<->RIS, RIS<->BS)
+  exponent_direct: 3.6     # pathloss exponent for the blocked/NLOS direct link
+  bs_ris_distance: 20.0    # BS<->RIS separation [m]
+  ue_ris_min: 5.0          # min UE<->RIS distance [m]
+  ue_ris_max: 25.0         # max UE<->RIS distance [m]
+  rician_k_db: 5.0         # Rician K-factor for RIS links [dB]
+
+channel:
+  direct_blockage: 0.0     # rho_bar in [0,1]; 0 = fully blocked (A1). Recommend >0 (partial).
+  coherence_slots: 10      # channel stays fixed for this many slots (block fading)
+  csi_error_std: 0.0       # Gaussian CSI estimation error std (0 = perfect); robustness sweep
+  phase_bits: 0            # RIS phase quantization bits (0 = continuous); robustness sweep
+  csi_delay_slots: 0       # delayed CSI (0 = up to date); robustness sweep
+
+mec:
+  F_max: 20.0e9        # total MEC CPU capacity [cycles/s]
+  cycles_per_bit: 500  # omega: CPU cycles required per offloaded bit
+  rho_out: 0.2         # output/input data ratio (downlink result size)
+
+queue:
+  arrival_mean_bits: 3.0e5   # mean task arrival [bits/slot] (exponential); < per-user capacity so queues are stabilizable
+  arrival_model: "exponential"  # {exponential}
+  q_norm: 2.0e6        # queue normalization constant for observations/rewards
+
+hierarchy:
+  H: 50                # meta-controller (strategist) period in slots
+  lambda_E: 1.0        # latency<->EE trade-off weight (swept for Pareto, R3.2)
+  objective: "dpp"     # reward objective: {ee_latency, dinkelbach, dpp}
+  dpp_V: 1.0           # Lyapunov drift-plus-penalty V parameter
+
+training:
+  seed: 0
+  low_timesteps: 200000    # tactician pre-training
+  meta_timesteps: 100000   # strategist training
+  flat_timesteps: 300000   # flat-PPO baseline
+  ppo:
+    n_steps: 512
+    batch_size: 128
+    learning_rate: 3.0e-4
+    gamma: 0.995
+    gae_lambda: 0.95
+    clip_range: 0.2
+    ent_coef: 0.0
+    vf_coef: 0.7
+
+# 'fast' profile overrides for smoke tests / reduced-scale runs in constrained envs
+fast:
+  low_timesteps: 4000
+  meta_timesteps: 2000
+  flat_timesteps: 4000
+  eval_steps: 400

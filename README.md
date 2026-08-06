@@ -1,11 +1,9 @@
-# Scalable RIS-MEC Resource Allocation via Hierarchical DRL — ICC 2027 revision
+# Scalable RIS-MEC Resource Allocation via Hierarchical DRL
 
-Clean, reproducible reimplementation of the RIS-assisted MEC hierarchical DRL
-framework, rebuilt from the original scattered notebook to address the GLOBECOM
-2026 reviews. See [`REVISION_STRATEGY.md`](REVISION_STRATEGY.md) for the full
-review→fix mapping.
+Implementation of the RIS-assisted MEC hierarchical DRL
+framework.
 
-## What changed vs. the notebook (the three root-cause fixes)
+## Changes effected from our previous notebook
 
 1. **The RIS is now actually *active* (Gap A).** The reflection coefficient is
    `a_g · e^{jθ_g}` with amplitude gain `a_g` (was unit-modulus/passive). The
@@ -15,14 +13,12 @@ review→fix mapping.
    and `P_RIS = Σ_g (N/G)(p_c + p_a a_g²)` is counted in the energy.
 2. **HDRL now optimizes the P1 objective (Gap B).** Reward comes from
    `objectives.py` — selectable normalized-EE, Dinkelbach, or Lyapunov
-   drift-plus-penalty — so the trained quantity matches the reported EE (fixes
-   Reviewer 3's "problem solved ≠ P1").
+   drift-plus-penalty — so the trained quantity matches the reported EE 
 3. **Reproducibility & fidelity (Gap C).** Single seeded RNG; RIS-standard
    reference-distance pathloss; explicit queue update `Q_k(t+1)=max(Q_k−b_k,0)+A_k`;
    one config file (`configs/default.yaml`) that *is* the parameter table.
 
-New baseline: **Lyapunov drift-plus-penalty (DPP)** — the queue-aware comparator
-Reviewer 2 requested — alongside IFP and the heuristics.
+New baseline: **Lyapunov drift-plus-penalty (DPP)** — alongside IFP and the heuristics.
 
 ## Layout
 
@@ -55,10 +51,6 @@ python -m experiments.run_all --profile full
 python -m experiments.run_all --profile full --only k_sweep
 ```
 
-Profiles (`experiments/run_all.py`) trade fidelity for wall-clock. **The figures
-in `results/` are `reduced`-scale** (short training, 1–2 seeds) — enough to show
-the correct *shapes and orderings*; rerun `--profile full` on a GPU for
-camera-ready numbers.
 
 ## Studies
 

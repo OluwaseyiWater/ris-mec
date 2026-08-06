@@ -127,7 +127,7 @@ def run_IFP(cfg, seed=0, steps=1000, inner=6):
 
 
 # --------------------------------------------------------------------------- #
-#  NEW: Lyapunov drift-plus-penalty controller
+#  Lyapunov drift-plus-penalty controller
 # --------------------------------------------------------------------------- #
 def run_DPP(cfg, seed=0, steps=1000):
     env = RISMECEnv(cfg, seed=seed); env.reset(); infos = []

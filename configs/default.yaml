@@ -1,6 +1,6 @@
 # =============================================================================
 #  RIS-MEC HDRL — all simulation parameters.
-#  Every experiment reads from a config; nothing is hard-coded in the physics.
+#  Every experiment reads from a config
 # =============================================================================
 
 system:

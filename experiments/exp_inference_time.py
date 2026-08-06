@@ -52,7 +52,7 @@ def time_learned_flat(cfg):
 
 
 def time_baseline(cfg, fn):
-    # crude: total wall time for N_SLOTS minus an env-only baseline
+    # total wall time for N_SLOTS minus an env-only baseline
     env = RISMECEnv(cfg, seed=0); env.reset()
     t0 = time.perf_counter(); fn(cfg, seed=0, steps=N_SLOTS); dt = time.perf_counter() - t0
     return 1e3 * dt / N_SLOTS

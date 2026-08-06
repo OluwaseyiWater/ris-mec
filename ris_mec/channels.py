@@ -138,7 +138,7 @@ class ChannelModel:
 
 
 def quantize_phase(theta: np.ndarray, bits: int) -> np.ndarray:
-    """Quantize phase shifts to `bits` bits (R2.6). bits<=0 keeps them continuous."""
+    """Quantize phase shifts to `bits` bits. bits<=0 keeps them continuous."""
     if bits is None or bits <= 0:
         return theta
     levels = 2 ** bits

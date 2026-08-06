@@ -12,7 +12,7 @@ timescale of each variable.
     RIS phases theta_g at every slot.
 
 Training is two-phase: pre-train the tactician under randomized strategy, freeze
-it, then train the strategist on top (Algorithm 1).
+it, then train the strategist on top.
 """
 
 from __future__ import annotations

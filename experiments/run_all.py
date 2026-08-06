@@ -99,7 +99,7 @@ def plot_training_cost(rows, profile):
     ax.bar(d["method"], d["train_time"],
            color=[style_for("Flat PPO" if m == "Flat" else m)["color"] for m in d["method"]])
     ax.set_ylabel("Train/solve time (s)")
-    ax.set_title(f"Compute at $K$={int(df.K.max())} ({profile})")
+    #ax.set_title(f"Compute at $K$={int(df.K.max())} ({profile})")
     fig.tight_layout()
     for ext in ("pdf", "png"):
         fig.savefig(os.path.join(RESULTS, f"fig_training_cost.{ext}"))
@@ -140,15 +140,15 @@ def plot_ablation(out, profile):
     # RIS on/off
     d = pd.DataFrame(out["ris"])
     axes[0].bar(d["config"], d["latency"], color=[style_for("HDRL")["color"], "#888"])
-    axes[0].set_ylabel("Avg. latency (s)"); axes[0].set_title("Active vs passive RIS")
+    axes[0].set_ylabel("Avg. latency (s)"); axes[0].set_title("")
     # H sweep
     d = pd.DataFrame(out["H"]).sort_values("H")
     axes[1].plot(d["H"], d["latency"], **style_for("HDRL"))
-    axes[1].set_xlabel("Meta-interval $H$"); axes[1].set_ylabel("Avg. latency (s)"); axes[1].set_title("H sensitivity")
+    axes[1].set_xlabel("Meta-interval $H$"); axes[1].set_ylabel("Avg. latency (s)"); axes[1].set_title("")
     # G sweep
     d = pd.DataFrame(out["G"]).sort_values("G")
     axes[2].plot(d["G"], d["latency"], **style_for("DPP"))
-    axes[2].set_xlabel("Groups $G$"); axes[2].set_ylabel("Avg. latency (s)"); axes[2].set_title("G sensitivity")
+    axes[2].set_xlabel("Groups $G$"); axes[2].set_ylabel("Avg. latency (s)"); axes[2].set_title("")
     #fig.suptitle(f"Ablations ({profile}-scale)", fontsize=9)
     fig.tight_layout()
     for ext in ("pdf", "png"):
@@ -157,7 +157,7 @@ def plot_ablation(out, profile):
 
 
 # ======================================================================= #
-#  Study 3: Pareto frontier (vary lambda_E) -- R3.2
+#  Study 3: Pareto frontier (vary lambda_E) 
 # ======================================================================= #
 def study_pareto(profile):
     p = PROFILES[profile]; seed = p["seeds"][0]
@@ -183,7 +183,8 @@ def plot_pareto(rows, profile):
         st = style_for(m)
         ax.plot(d["latency"], d["ee_mbit_j"], label=m, **st)
     ax.set_xlabel("Avg. latency (s)"); ax.set_ylabel("Energy efficiency (Mbit/J)")
-    #ax.set_title(f"Latency-EE Pareto ({profile})"); ax.legend()
+    #ax.set_title(f"Latency-EE Pareto ({profile})")
+    ax.legend()
     fig.tight_layout()
     for ext in ("pdf", "png"):
         fig.savefig(os.path.join(RESULTS, f"fig_pareto.{ext}"))
@@ -222,12 +223,12 @@ def plot_robustness(rows, profile):
     fig, axes = plt.subplots(1, 2, figsize=(6.4, 2.5))
     d = df[df.impair == "csi_error"].sort_values("value")
     axes[0].plot(d["value"], d["ee_mbit_j"], **style_for("HDRL"))
-    axes[0].set_xlabel("CSI error std"); axes[0].set_ylabel("EE (Mbit/J)"); axes[0].set_title("Imperfect CSI")
+    axes[0].set_xlabel("CSI error std"); axes[0].set_ylabel("EE (Mbit/J)"); axes[0].set_title("")
     d = df[df.impair == "phase_bits"].copy()
     d["value"] = d["value"].replace(0, 8)  # show continuous as 8-bit-equivalent
     d = d.sort_values("value")
     axes[1].plot(d["value"], d["ee_mbit_j"], **style_for("DPP"))
-    axes[1].set_xlabel("RIS phase bits (8=cont.)"); axes[1].set_ylabel("EE (Mbit/J)"); axes[1].set_title("Phase quantization")
+    axes[1].set_xlabel("RIS phase bits (8=cont.)"); axes[1].set_ylabel("EE (Mbit/J)"); axes[1].set_title("")
     #fig.suptitle(f"Robustness ({profile}-scale)", fontsize=9)
     fig.tight_layout()
     for ext in ("pdf", "png"):

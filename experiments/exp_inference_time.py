@@ -5,6 +5,11 @@ Inference time is independent of the learned weights, so untrained PPO policies 
 the correct dimensions give a faithful timing for the learned methods. Baselines are
 timed by their per-slot solve. Env.step() physics is excluded so we compare the
 decision cost itself.
+
+Deliberately single-world: this measures the cost of *one* decision for *one*
+deployment, which is the quantity the paper reports. It must not be batched, and
+it uses the same FrozenPolicy call path as ris_mec/evaluate.py so the number
+reflects what the evaluated agent actually pays.
 """
 import os, sys, time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -16,6 +21,7 @@ from stable_baselines3.common.vec_env import DummyVecEnv
 from ris_mec.utils import load_config
 from ris_mec.env import RISMECEnv
 from ris_mec.hierarchy import MetaManager, TacticianEnv, MetaEnv
+from ris_mec.vec_env import FrozenPolicy
 from ris_mec.flat import FlatEnv
 from ris_mec import baselines
 from ris_mec.plotstyle import apply_style, style_for
@@ -28,13 +34,13 @@ def time_learned_hdrl(cfg):
     low = PPO("MlpPolicy", DummyVecEnv([lambda: TacticianEnv(cfg, seed=0)]), n_steps=64, verbose=0)
     meta = PPO("MlpPolicy", DummyVecEnv([lambda: MetaEnv(cfg, low, seed=0)]), n_steps=64, verbose=0)
     env = RISMECEnv(cfg, seed=0); mgr = MetaManager(env)
+    low_pi, meta_pi = FrozenPolicy(low), FrozenPolicy(meta)
     obs, _ = env.reset(); H = cfg["hierarchy"]["H"]
     t0 = time.perf_counter()
     for _ in range(N_SLOTS):
         if env.t % H == 0:
-            a_meta, _ = meta.predict(mgr.meta_obs(), deterministic=True); mgr.apply_meta(a_meta)
-        a_low, _ = low.predict(obs, deterministic=True)
-        obs, _, done, _, _ = env.step(a_low)
+            mgr.apply_meta(meta_pi(mgr.meta_obs()[None, :])[0])
+        obs, _, done, _, _ = env.step(low_pi(obs[None, :])[0])
         if done: obs, _ = env.reset()
     return 1e3 * (time.perf_counter() - t0) / N_SLOTS
 
@@ -42,11 +48,11 @@ def time_learned_hdrl(cfg):
 def time_learned_flat(cfg):
     fenv = FlatEnv(cfg, seed=0)
     flat = PPO("MlpPolicy", DummyVecEnv([lambda: FlatEnv(cfg, seed=0)]), n_steps=64, verbose=0)
+    pi = FrozenPolicy(flat)
     obs, _ = fenv.reset()
     t0 = time.perf_counter()
     for _ in range(N_SLOTS):
-        a, _ = flat.predict(obs, deterministic=True)
-        obs, _, done, _, _ = fenv.step(a)
+        obs, _, done, _, _ = fenv.step(pi(obs[None, :])[0])
         if done: obs, _ = fenv.reset()
     return 1e3 * (time.perf_counter() - t0) / N_SLOTS
 

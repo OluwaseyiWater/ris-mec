@@ -15,16 +15,23 @@ RIS-MEC environment with a *physically consistent, active* RIS.
   Gap B (objective != P1): reward comes from objectives.RewardObjective, which
     optimizes normalized EE / latency / Lyapunov-DPP -- see objectives.py.
 
-  Gap C (reproducibility/fidelity): 3GPP UMi pathloss via channels.py, single
-    seeded RNG, explicit queue update Q_k(t+1)=max(Q_k-b_k,0)+A_k, parameter
-    table in configs/default.yaml.
+  Gap C (reproducibility/fidelity): reference-distance pathloss via channels.py,
+    single seeded RNG, explicit queue update Q_k(t+1)=max(Q_k-b_k,0)+A_k,
+    parameter table in configs/default.yaml.
 
 Timescale decomposition:
   * strategic variables (alpha, f, a_g) are set by the strategist every H slots
     through `set_strategy(...)`;
   * tactical variables (P^ul, P^dl, beta, theta_g) are the per-slot action.
 
-Everything is vectorized over users (K) and elements/groups (N, G).
+This class is a **single-world facade** over :class:`ris_mec.core.BatchedRISMEC`,
+which holds the actual (vectorized) dynamics. It exists because a few things
+genuinely want one world at a time: the model-based baselines, and
+``experiments/exp_inference_time.py``, which measures the per-slot *decision*
+latency that goes in the paper and must therefore not be batched.
+
+For training and evaluation use the vector envs in :mod:`ris_mec.vec_env`, which
+drive many worlds per numpy call and are one to two orders of magnitude faster.
 """
 
 from __future__ import annotations
@@ -32,8 +39,19 @@ import numpy as np
 import gymnasium as gym
 from gymnasium import spaces
 
-from .channels import ChannelModel, quantize_phase, dbm_to_watt, db_to_lin
+from .channels import ChannelView, quantize_phase, dbm_to_watt, db_to_lin
+from .core import BatchedRISMEC
 from .objectives import RewardObjective, StepStats
+
+# Attributes that are simply forwarded from the batched core.
+_FORWARD = (
+    "K", "N", "G", "M", "tau", "max_steps", "B", "n0", "sigma_ris_psd",
+    "enable_amp", "a_init", "Pk_max", "PBS_max", "pc", "pa", "P_ris_budget",
+    "a_max", "P_out_max", "F_max", "omega", "rho_out", "arrival_mean", "q_norm",
+    "phase_bits", "base_seed", "rng", "cfg", "reward_obj", "t",
+)
+# Batched state exposed to callers as un-batched (K,)/(G,) arrays.
+_ROW_STATE = ("queues", "alpha", "f", "a_gains", "last_h2")
 
 
 class RISMECEnv(gym.Env):
@@ -41,213 +59,86 @@ class RISMECEnv(gym.Env):
 
     def __init__(self, cfg: dict, seed: int | None = None):
         super().__init__()
-        self.cfg = cfg
-        s = cfg["system"]
-        self.K = int(s["K"]); self.N = int(s["N"]); self.G = int(s["G"])
-        assert self.N % self.G == 0, "N must be divisible by G"
-        self.M = self.N // self.G                     # elements per group
-        self.tau = float(s["tau"]); self.max_steps = int(s["max_steps"])
-
-        # Bandwidth & noise PSDs (W/Hz)
-        b = cfg["bandwidth"]
-        self.B = float(b["B_total"])
-        nf = float(b["noise_figure_db"])
-        self.n0 = dbm_to_watt(float(b["noise_psd_dbm_hz"]) + nf)          # thermal PSD
-        self.sigma_ris_psd = dbm_to_watt(float(cfg["active_ris"]["sigma_ris_psd_dbm_hz"]))
-        self.enable_amp = bool(cfg["active_ris"].get("enable_amplification", True))
-        self.a_init = float(cfg["active_ris"].get("a_init", 1.0))
-
-        # Power model
-        p = cfg["power"]
-        self.Pk_max = float(p["Pk_ul_max"]); self.PBS_max = float(p["Pbs_dl_max"])
-        self.pc = float(p["ris_static_pc"]); self.pa = float(p["ris_amp_pa"])
-        self.P_ris_budget = float(p["ris_power_budget"])
-        self.a_max = float(p["ris_amp_max"])
-        self.P_out_max = float(p["ris_out_power_max"])
-
-        # MEC
-        m = cfg["mec"]
-        self.F_max = float(m["F_max"]); self.omega = float(m["cycles_per_bit"])
-        self.rho_out = float(m["rho_out"])
-
-        # Queue
-        q = cfg["queue"]
-        self.arrival_mean = float(q["arrival_mean_bits"])
-        self.q_norm = float(q["q_norm"])
-
-        # Phase quantization (robustness)
-        self.phase_bits = int(cfg["channel"].get("phase_bits", 0))
-
-        # RNG + channels
-        self.base_seed = int(cfg["training"].get("seed", 0)) if seed is None else int(seed)
-        self.rng = np.random.default_rng(self.base_seed)
-        self.chan = ChannelModel(cfg, self.rng)
-
-        # Reward objective
-        self.reward_obj = RewardObjective(cfg)
-
-        # Strategic variables (defaults; strategist overwrites via set_strategy)
-        self.alpha = np.full(self.K, 0.5)
-        self.f = np.full(self.K, self.F_max / self.K)
-        self.a_gains = np.full(self.G, self.a_init if self.enable_amp else 1.0)
-
-        # Spaces. Observation: per-UE channel gains (uplink composite proxy),
-        # queues, alpha, f, plus normalized time.  Action (tactical):
-        # [ul_p(K), dl_p(1), beta_logits(K), theta_g(G)].
-        self._obs_dim = 4 * self.K + 1
+        self.core = BatchedRISMEC(cfg, n_envs=1, seed=seed)
+        self.chan = ChannelView(self.core.chan, 0)
+        self._obs_dim = self.core.obs_dim
         self.observation_space = spaces.Box(0.0, 1.0, shape=(self._obs_dim,), dtype=np.float32)
-        self.action_space = spaces.Box(-1.0, 1.0, shape=(self.K + 1 + self.K + self.G,),
-                                       dtype=np.float32)
+        self.action_space = spaces.Box(-1.0, 1.0, shape=(self.core.act_dim,), dtype=np.float32)
 
-        self.t = 0
-        self.queues = self.rng.exponential(self.arrival_mean, size=self.K)
-        self.last_h2 = np.ones(self.K)
+    # ------------------------------------------------------------------ #
+    #  Transparent access to the core's parameters and state
+    # ------------------------------------------------------------------ #
+    def __getattr__(self, name):
+        if name in _FORWARD:
+            return getattr(self.core, name)
+        if name in _ROW_STATE:
+            return getattr(self.core, name)[0]
+        raise AttributeError(name)
+
+    def __setattr__(self, name, value):
+        if name in _ROW_STATE:
+            getattr(self.core, name)[0] = value
+            if name == "a_gains":
+                self.core._strategy_version += 1
+            return
+        if name == "t":
+            self.core.t = value
+            return
+        super().__setattr__(name, value)
 
     # ================================================================== #
     #  Strategic interface (called by the strategist every H slots)
     # ================================================================== #
     def set_strategy(self, alpha=None, f=None, a_gains=None):
-        if alpha is not None:
-            self.alpha = np.clip(np.asarray(alpha, float), 0.0, 1.0)
-        if f is not None:
-            self.f = np.clip(np.asarray(f, float), 0.0, self.F_max)
-        if a_gains is not None:
-            a = np.clip(np.asarray(a_gains, float), 0.0, self.a_max)
-            self.a_gains = a if self.enable_amp else np.ones(self.G)
+        self.core.set_strategy(alpha=alpha, f=f, a_gains=a_gains)
 
     # ================================================================== #
-    #  Physics helpers (vectorized)
+    #  Physics helpers kept at their original (un-batched) signatures,
+    #  because the model-based baselines and the smoke test call them.
     # ================================================================== #
-    def _apply_output_power_constraint(self, a_gains, hr):
-        """Clip per-group amplitude so per-element output power <= P_out_max (R2.1),
-        then rescale to respect the global RIS power budget P_RIS <= P_RIS_max."""
-        # Incident signal power per element ~ sum_k P_k^ul |hr_{k,n}|^2 ; use max power
-        # as a worst-case envelope for the actuator constraint, aggregated per group.
-        inc = self.Pk_max * np.sum(np.abs(hr) ** 2, axis=0)          # (N,)
-        inc_g = inc.reshape(self.G, self.M).mean(axis=1)            # (G,)
-        band_noise = self.sigma_ris_psd * self.B
-        amax_stab = np.sqrt(self.P_out_max / np.maximum(inc_g + band_noise, 1e-30))
-        a = np.minimum(a_gains, np.minimum(amax_stab, self.a_max))
-        # Global RIS power budget
-        p_ris = np.sum(self.M * (self.pc + self.pa * a ** 2))
-        if p_ris > self.P_ris_budget:
-            # scale the dynamic part down uniformly
-            static = self.M * self.pc * self.G
-            avail = max(self.P_ris_budget - static, 0.0)
-            scale = np.sqrt(avail / max(np.sum(self.M * self.pa * a ** 2), 1e-30))
-            a = a * min(scale, 1.0)
-        p_ris = float(np.sum(self.M * (self.pc + self.pa * a ** 2)))
-        return a, p_ris
+    def _noise_floors(self, a_gains, g, hr):
+        """Uplink (at BS, scalar) and downlink (per UE, (K,)) amplifier-noise
+        floors [W/Hz] for one world."""
+        G, M = self.core.G, self.core.M
+        a2 = np.asarray(a_gains, float) ** 2
+        zeta_g = (np.abs(g) ** 2).reshape(G, M).sum(axis=1)                      # (G,)
+        xi_gk = (np.abs(hr) ** 2).reshape(-1, G, M).sum(axis=2)                  # (K,G)
+        ul = self.core.sigma_ris_psd * float(np.sum(a2 * zeta_g))
+        dl = self.core.sigma_ris_psd * (a2[None, :] * xi_gk).sum(axis=1)         # (K,)
+        return ul, dl
 
     def _composite_channel(self, a_elem, theta_elem, g, hr, hd):
         reflect = a_elem * np.exp(1j * theta_elem)                  # (N,)
-        cascade = np.einsum('kn,n,n->k', hr, reflect, g)           # (K,)
+        cascade = np.einsum('kn,n,n->k', hr, reflect, g)            # (K,)
         h = hd + cascade
         return np.abs(h) ** 2                                       # (K,)
 
-    def _noise_floors(self, a_gains, g, hr):
-        """Uplink (at BS) and downlink (per UE) amplifier-noise floors [W/Hz]."""
-        # zeta_g = sum_{n in g} |g_n|^2 ; xi_{g,k} = sum_{n in g} |hr_{k,n}|^2
-        zeta_g = (np.abs(g) ** 2).reshape(self.G, self.M).sum(axis=1)         # (G,)
-        xi_gk = (np.abs(hr) ** 2).reshape(self.K, self.G, self.M).sum(axis=2)  # (K,G)
-        a2 = a_gains ** 2
-        ul_ris_psd = self.sigma_ris_psd * np.sum(a2 * zeta_g)                 # scalar
-        dl_ris_psd = self.sigma_ris_psd * np.sum(a2[None, :] * xi_gk, axis=1)  # (K,)
-        return ul_ris_psd, dl_ris_psd
+    def _apply_output_power_constraint(self, a_gains, hr):
+        """Un-batched wrapper kept for API compatibility; the fast path used by
+        :meth:`step` is :meth:`ris_mec.core.BatchedRISMEC._apply_output_power_constraint`."""
+        core = self.core
+        inc = core.Pk_max * np.sum(np.abs(hr) ** 2, axis=0)          # (N,)
+        inc_g = inc.reshape(core.G, core.M).mean(axis=1)             # (G,)
+        band_noise = core.sigma_ris_psd * core.B
+        amax_stab = np.sqrt(core.P_out_max / np.maximum(inc_g + band_noise, 1e-30))
+        a = np.minimum(np.asarray(a_gains, float), np.minimum(amax_stab, core.a_max))
+        static = core.M * core.pc * core.G
+        avail = max(core.P_ris_budget - static, 0.0)
+        scale = np.sqrt(avail / max(np.sum(core.M * core.pa * a ** 2), 1e-30))
+        a = a * min(scale, 1.0)
+        return a, float(np.sum(core.M * (core.pc + core.pa * a ** 2)))
 
     # ================================================================== #
     def reset(self, *, seed=None, options=None):
+        obs = self.core.reset(seed=seed)
         if seed is not None:
-            self.rng = np.random.default_rng(seed)
-            self.chan = ChannelModel(self.cfg, self.rng)
-        self.t = 0
-        self.queues = self.rng.exponential(self.arrival_mean, size=self.K)
-        self.alpha = np.full(self.K, 0.5)
-        self.f = np.full(self.K, self.F_max / self.K)
-        self.a_gains = np.full(self.G, self.a_init if self.enable_amp else 1.0)
-        self.reward_obj.reset()
-        return self._obs(), {}
+            self.chan = ChannelView(self.core.chan, 0)
+        return obs[0], {}
 
     def step(self, action):
-        a = np.clip(np.asarray(action, float), -1.0, 1.0)
-        K, G = self.K, self.G
-
-        # --- decode tactical action ---
-        ul_p = (a[:K] + 1) / 2 * self.Pk_max
-        dl_p = (a[K] + 1) / 2 * self.PBS_max
-        beta_logits = a[K + 1:K + 1 + K]
-        beta = np.exp(beta_logits - beta_logits.max()); beta /= beta.sum()
-        theta_g = (a[-G:] + 1) / 2 * 2 * np.pi
-        theta_g = quantize_phase(theta_g, self.phase_bits)
-
-        # --- channels (agent may see noisy/delayed CSI, physics uses truth) ---
-        g, hr, hd = self.chan.true_channels()
-
-        # --- active-RIS amplitude with stability + budget constraints ---
-        a_gains, p_ris = self._apply_output_power_constraint(self.a_gains, hr)
-        a_elem = np.repeat(a_gains, self.M)
-        theta_elem = np.repeat(theta_g, self.M)
-
-        # --- composite gains and amplifier-noise floors ---
-        h2 = self._composite_channel(a_elem, theta_elem, g, hr, hd)          # (K,)
-        self.last_h2 = h2
-        ul_ris_psd, dl_ris_psd = self._noise_floors(a_gains, g, hr)
-
-        # --- rates (bandwidth-consistent noise) ---
-        W = beta * self.B                                                   # (K,)
-        n_ul = W * (self.n0 + ul_ris_psd)                                   # (K,)
-        n_dl = W * (self.n0 + dl_ris_psd)                                   # (K,)
-        R_ul = W * np.log2(1 + ul_p * h2 / np.maximum(n_ul, 1e-30))
-        R_dl = W * np.log2(1 + dl_p * h2 / np.maximum(n_dl, 1e-30))
-
-        # --- offloading, latency (bits limited by rate over the slot) ---
-        demand_ul = self.alpha * self.queues
-        bits_ul = np.minimum(demand_ul, R_ul * self.tau)
-        bits_dl = np.minimum(self.rho_out * self.alpha * self.queues, R_dl * self.tau)
-        t_ul = bits_ul / np.maximum(R_ul, 1e-9)
-        t_dl = bits_dl / np.maximum(R_dl, 1e-9)
-        t_cmp = (bits_ul * self.omega) / np.maximum(self.f, 1e-9)
-        latency = float(np.mean(t_ul + t_dl + t_cmp))
-
-        # --- energy: uplink + downlink transmit + RIS power over the slot ---
-        energy = self.tau * (float(np.sum(ul_p)) + float(dl_p) + p_ris)
-        total_bits = float(np.sum(bits_ul))
-        ee = total_bits / max(energy, 1e-12)
-
-        # --- queue update: Q_k(t+1) = max(Q_k - b_k, 0) + A_k ---
-        served = bits_ul.copy()
-        self.queues = np.clip(self.queues - bits_ul, 0.0, None)
-        arrivals = self.rng.exponential(self.arrival_mean, size=self.K)
-        self.queues = self.queues + arrivals
-
-        # --- reward via objective (fixes Gap B) ---
-        stats = StepStats(bits=total_bits, energy=energy, latency=latency, ee=ee,
-                          queues=self.queues.copy(), arrivals=arrivals, served=served)
-        reward = self.reward_obj(stats)
-
-        # --- advance channels & time ---
-        self.chan.sample()
-        self.t += 1
-        done = self.t >= self.max_steps
-        info = {
-            "latency": latency, "energy": energy, "bits": total_bits, "ee": ee,
-            "p_ris": p_ris, "queue_mean": float(np.mean(self.queues)),
-            "a_mean": float(np.mean(a_gains)),
-        }
-        return self._obs(), reward, done, False, info
+        obs, reward, done, info = self.core.step(np.asarray(action, float)[None, :])
+        return (obs[0], float(reward[0]), bool(done), False,
+                {k: float(v[0]) for k, v in info.items()})
 
     def _obs(self):
-        g, hr, hd = self.chan.observed_channels()
-        # normalized composite-ish gains from observed CSI (agent view)
-        gain_ue = np.abs(hd) ** 2 + np.mean(np.abs(hr) ** 2, axis=1) * np.mean(np.abs(g) ** 2)
-        gain_ue = gain_ue / (1.0 + gain_ue)
-        obs = np.concatenate([
-            gain_ue,
-            np.clip(self.queues / self.q_norm, 0, 1),
-            self.alpha,
-            self.f / self.F_max,
-            [self.t / self.max_steps],
-        ]).astype(np.float32)
-        if obs.size != self._obs_dim:
-            obs = np.resize(obs, self._obs_dim).astype(np.float32)
-        return obs
+        return self.core.obs()[0]

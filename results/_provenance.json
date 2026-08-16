@@ -1,0 +1,12 @@
+{
+  "profile": "reduced",
+  "studies": [
+    "k_sweep",
+    "ablation",
+    "pareto",
+    "robustness"
+  ],
+  "config_sha": "5cb894c58fd87056",
+  "git_commit": "0100a6d",
+  "utc": "2026-08-16T15:05:07Z"
+}

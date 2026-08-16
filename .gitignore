@@ -1,0 +1,7 @@
+__pycache__/
+*.py[cod]
+.venv/
+
+# Trained policy weights written by `run_all.py --cache`. Reproducible from the
+# config + seed, and large, so they are not part of the repo.
+results/model_cache/

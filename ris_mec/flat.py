@@ -9,15 +9,18 @@ from __future__ import annotations
 import numpy as np
 import gymnasium as gym
 from gymnasium import spaces
-from stable_baselines3 import PPO
-from stable_baselines3.common.vec_env import DummyVecEnv
 
 from .env import RISMECEnv
-from .hierarchy import MetaManager, _ppo
+from .hierarchy import MetaManager, _ppo, vec_cfg, fit_n_envs
+from .vec_env import VecFlatEnv
 
 
 class FlatEnv(gym.Env):
-    """Combined meta+tactical control every slot."""
+    """Single-world combined meta+tactical control every slot.
+
+    Kept for evaluation and per-slot inference timing; training uses the batched
+    :class:`ris_mec.vec_env.VecFlatEnv`.
+    """
 
     def __init__(self, cfg, seed=0):
         super().__init__()
@@ -46,8 +49,12 @@ class FlatEnv(gym.Env):
 
 
 def train_flat(cfg, seed=0):
-    venv = DummyVecEnv([lambda: FlatEnv(cfg, seed=seed)])
-    p = cfg["training"]["ppo"]
-    flat = _ppo(venv, cfg, batch_size=128, learning_rate=2e-4)
-    flat.learn(total_timesteps=int(cfg["training"]["flat_timesteps"]))
+    vc = vec_cfg(cfg)
+    total = int(cfg["training"]["flat_timesteps"])
+    n = fit_n_envs(cfg, total, cfg["training"]["ppo"]["n_steps"])
+    venv = VecFlatEnv(cfg, n_envs=n, seed=seed)
+    flat = _ppo(venv, cfg, n_envs=n,
+                batch_size=128 * (n if vc["scale_batch"] else 1),
+                learning_rate=2e-4)
+    flat.learn(total_timesteps=total)
     return flat

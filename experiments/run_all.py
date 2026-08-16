@@ -21,13 +21,28 @@ import matplotlib.pyplot as plt
 
 from ris_mec.utils import load_config, clone_cfg
 from ris_mec.plotstyle import apply_style, style_for
-from experiments.common import aggregate, run_method, save_json, RESULTS, eval_steps
+from experiments.common import (aggregate, aggregate_many, run_method, save_json,
+                                RESULTS, eval_steps, configure, write_provenance)
 
+# Training budgets. NOTE: `flat` is set to the *environment-interaction* budget the
+# hierarchy consumes, low + H*meta, not to a smaller round number. One strategist
+# step advances the env by H slots, so a flat agent given `low + meta` steps would
+# see H times less experience and lose for that reason alone -- an unfair
+# comparison, and the first thing a reviewer recomputes. `_budget_parity` below
+# recomputes it from the config's H so the two stay locked together.
 PROFILES = {
-    "fast":    dict(low=4000,  meta=2000,  flat=4000,  seeds=[0],       Ks=[4, 6, 8],        eval=400),
-    "reduced": dict(low=6000,  meta=2500,  flat=9000, seeds=[0, 1],    Ks=[4, 6, 8, 10],    eval=800),
-    "full":    dict(low=200000, meta=100000, flat=300000, seeds=[0,4,10,16,24,42,50,64,100,128,200,256,480,512,1024], Ks=[4,6,8,10,12,16,32,64], eval=2000),
+    "fast":    dict(low=4000,  meta=2000,  seeds=[0],       Ks=[4, 6, 8],        eval=400),
+    "reduced": dict(low=6000,  meta=2500,  seeds=[0, 1],    Ks=[4, 6, 8, 10],    eval=800),
+    "full":    dict(low=200000, meta=25000, seeds=[0,4,10,16,24,42,50,64,100,128,200,256,480,512,1024], Ks=[4,6,8,10,12,16,32,64], eval=2000),
 }
+
+
+def _budget_parity(p, H):
+    """Environment slots the hierarchy consumes: E_L + H*E_H."""
+    return int(p["low"]) + int(H) * int(p["meta"])
+
+# Filled in by main(); studies read them for their fan-out.
+RUN = {"jobs": 1, "threads": 0}
 
 
 def make_cfg(profile, **over):
@@ -35,13 +50,14 @@ def make_cfg(profile, **over):
     cfg = load_config()
     cfg["training"]["low_timesteps"] = p["low"]
     cfg["training"]["meta_timesteps"] = p["meta"]
-    cfg["training"]["flat_timesteps"] = p["flat"]
     cfg.setdefault("fast", {})["eval_steps"] = p["eval"]
     for dotted, val in over.items():
         d = cfg; ks = dotted.split(".")
         for k in ks[:-1]:
             d = d.setdefault(k, {})
         d[ks[-1]] = val
+    # After the overrides, so an H sweep keeps the flat baseline matched.
+    cfg["training"]["flat_timesteps"] = _budget_parity(p, cfg["hierarchy"]["H"])
     return cfg, p
 
 
@@ -50,22 +66,39 @@ def make_cfg(profile, **over):
 # ======================================================================= #
 def study_k_sweep(profile):
     methods = ["HDRL", "Flat", "DPP", "IFP", "SCA", "AO", "FP"]
-    rows = []
-    for K in PROFILES[profile]["Ks"]:
-        cfg, p = make_cfg(profile, **{"system.K": K})
+    p = PROFILES[profile]
+    # One flat task list over (K, method, seed) so the pool stays saturated --
+    # the whole sweep is independent runs, and their costs differ by ~100x.
+    specs = []
+    for K in p["Ks"]:
+        cfg, _ = make_cfg(profile, **{"system.K": K})
         for m in methods:
-            t0 = time.time()
-            agg = aggregate(m, clone_cfg(cfg), p["seeds"])
-            agg["K"] = K
-            rows.append(agg)
-            print(f"[k_sweep] K={K:2d} {m:5s} lat={agg['latency']:.4f}±{agg['latency_ci']:.4f} "
-                  f"EE={agg['ee_mbit_j']:.2f}±{agg['ee_mbit_j_ci']:.2f} "
-                  f"q={agg['queue_mean']:.2e} ({time.time()-t0:.0f}s)", flush=True)
-            save_json("k_sweep.json", rows)   # incremental save
+            specs.append((K, m, clone_cfg(cfg), p["seeds"]))
+    t0 = time.time()
+    aggs = aggregate_many(specs, jobs=RUN["jobs"], threads=RUN["threads"],
+                          progress=_progress("k_sweep", t0))
+    rows = []
+    for agg in aggs:
+        agg["K"] = agg.pop("_label")
+        rows.append(agg)
+        print(f"[k_sweep] K={agg['K']:2d} {agg['method']:5s} "
+              f"lat={agg['latency']:.4f}±{agg['latency_ci']:.4f} "
+              f"EE={agg['ee_mbit_j']:.2f}±{agg['ee_mbit_j_ci']:.2f} "
+              f"q={agg['queue_mean']:.2e}", flush=True)
+    save_json("k_sweep.json", rows)
     pd.DataFrame(rows).to_csv(os.path.join(RESULTS, "k_sweep.csv"), index=False)
     plot_k_sweep(rows, profile)
     plot_training_cost(rows, profile)
     return rows
+
+
+def _progress(tag, t0):
+    def cb(done, total):
+        el = time.time() - t0
+        eta = el / done * (total - done)
+        print(f"[{tag}] {done}/{total} runs  elapsed {el/60:.1f}m  eta {eta/60:.1f}m",
+              flush=True)
+    return cb
 
 
 def plot_k_sweep(rows, profile):
@@ -110,26 +143,32 @@ def plot_training_cost(rows, profile):
 #  Study 2: Ablations (active vs passive RIS, H sweep, G sweep)
 # ======================================================================= #
 def study_ablation(profile):
-    p = PROFILES[profile]; seed = p["seeds"][0]
-    out = {"ris": [], "H": [], "G": []}
+    p = PROFILES[profile]; seeds = p["seeds"][:1]
+    specs = []
     # active vs passive RIS at K=8
     cfg, _ = make_cfg(profile, **{"system.K": 8})
     for m, label in [("HDRL", "active"), ("HDRL-passive", "passive")]:
-        r = run_method(m, clone_cfg(cfg), seed); r["config"] = label
-        out["ris"].append(r); print(f"[ablation RIS] {label}: lat={r['latency']:.4f} EE={r['ee_mbit_j']:.2f}", flush=True)
-        save_json("ablation.json", out)
-    # H sweep at K=8
+        specs.append((("ris", label), m, clone_cfg(cfg), seeds))
+    # H sweep at K=8 (the tactician is H-agnostic, so --cache trains it once)
     for H in [25, 50, 100]:
-        cfg, _ = make_cfg(profile, **{"system.K": 8, "hierarchy.H": H})
-        r = run_method("HDRL", clone_cfg(cfg), seed); r["H"] = H
-        out["H"].append(r); print(f"[ablation H={H}] lat={r['latency']:.4f} EE={r['ee_mbit_j']:.2f}", flush=True)
-        save_json("ablation.json", out)
+        c, _ = make_cfg(profile, **{"system.K": 8, "hierarchy.H": H})
+        specs.append((("H", H), "HDRL", clone_cfg(c), seeds))
     # G sweep at K=8 (N=128 divisible)
     for G in [4, 8, 16]:
-        cfg, _ = make_cfg(profile, **{"system.K": 8, "system.G": G})
-        r = run_method("HDRL", clone_cfg(cfg), seed); r["G"] = G
-        out["G"].append(r); print(f"[ablation G={G}] lat={r['latency']:.4f} EE={r['ee_mbit_j']:.2f}", flush=True)
-        save_json("ablation.json", out)
+        c, _ = make_cfg(profile, **{"system.K": 8, "system.G": G})
+        specs.append((("G", G), "HDRL", clone_cfg(c), seeds))
+
+    t0 = time.time()
+    aggs = aggregate_many(specs, jobs=RUN["jobs"], threads=RUN["threads"],
+                          progress=_progress("ablation", t0))
+    out = {"ris": [], "H": [], "G": []}
+    for agg in aggs:
+        group, label = agg.pop("_label")
+        agg["config" if group == "ris" else group] = label
+        out[group].append(agg)
+        print(f"[ablation {group}={label}] lat={agg['latency']:.4f} "
+              f"EE={agg['ee_mbit_j']:.2f}", flush=True)
+    save_json("ablation.json", out)
     plot_ablation(out, profile)
     return out
 
@@ -162,13 +201,21 @@ def plot_ablation(out, profile):
 def study_pareto(profile):
     p = PROFILES[profile]; seed = p["seeds"][0]
     lambdas = [0.3, 1.0, 3.0] if profile != "full" else [0.1, 0.3, 1.0, 3.0, 10.0]
-    rows = []
+    specs = []
     for lam in lambdas:
+        cfg, _ = make_cfg(profile, **{"system.K": 8, "hierarchy.lambda_E": lam})
         for m in ["HDRL", "DPP", "IFP"]:
-            cfg, _ = make_cfg(profile, **{"system.K": 8, "hierarchy.lambda_E": lam})
-            r = run_method(m, clone_cfg(cfg), seed); r["lambda_E"] = lam; r["method"] = m
-            rows.append(r); print(f"[pareto] lam={lam} {m}: lat={r['latency']:.4f} EE={r['ee_mbit_j']:.2f}", flush=True)
-            save_json("pareto.json", rows)
+            specs.append((lam, m, clone_cfg(cfg), [seed]))
+    t0 = time.time()
+    aggs = aggregate_many(specs, jobs=RUN["jobs"], threads=RUN["threads"],
+                          progress=_progress("pareto", t0))
+    rows = []
+    for agg in aggs:
+        agg["lambda_E"] = agg.pop("_label")
+        rows.append(agg)
+        print(f"[pareto] lam={agg['lambda_E']} {agg['method']}: "
+              f"lat={agg['latency']:.4f} EE={agg['ee_mbit_j']:.2f}", flush=True)
+    save_json("pareto.json", rows)
     pd.DataFrame(rows).to_csv(os.path.join(RESULTS, "pareto.csv"), index=False)
     plot_pareto(rows, profile)
     return rows
@@ -196,11 +243,17 @@ def plot_pareto(rows, profile):
 #  Trains one HDRL model, evaluates under impairments (no retrain).
 # ======================================================================= #
 def study_robustness(profile):
-    from ris_mec.hierarchy import train_hdrl
     from ris_mec.evaluate import evaluate_hdrl
+    from experiments.common import _hdrl_models, CACHE_DIR
+    from ris_mec.modelcache import ModelCache
+    import experiments.common as _common
     p = PROFILES[profile]; seed = p["seeds"][0]
     cfg, _ = make_cfg(profile, **{"system.K": 8})
-    low, meta = train_hdrl(cfg, seed=seed, enable_ris=True)
+    # Same (cfg, seed) as the K=8 HDRL run in k_sweep: with --cache this reuses
+    # that model instead of retraining it. The impairments below are applied at
+    # evaluation only, so they do not change the cache key.
+    low, meta = _hdrl_models(cfg, seed, True,
+                             ModelCache(CACHE_DIR, enabled=_common._CACHE_ENABLED))
     rows = []
     steps = eval_steps(cfg)
     for csi in [0.0, 0.05, 0.1, 0.2]:
@@ -244,12 +297,35 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--profile", default="reduced", choices=list(PROFILES))
     ap.add_argument("--only", default="all")
+    ap.add_argument("--jobs", type=int, default=1,
+                    help="runs executed concurrently in separate processes "
+                         "(the (K, method, seed) grid is independent). "
+                         "0 = one per CPU core.")
+    ap.add_argument("--threads", type=int, default=1,
+                    help="torch threads per worker; keep jobs*threads <= cores")
+    ap.add_argument("--cache", action="store_true",
+                    help="reuse trained models across studies and reruns "
+                         f"(results/model_cache/)")
     args = ap.parse_args()
+
+    jobs = args.jobs if args.jobs > 0 else (os.cpu_count() or 1)
+    RUN["jobs"], RUN["threads"] = jobs, max(1, args.threads)
+    configure(cache=args.cache)
+    if jobs == 1:
+        # Single-process: let torch use the box, nothing else is competing.
+        try:
+            import torch; torch.set_num_threads(max(1, args.threads or (os.cpu_count() or 1)))
+        except Exception:
+            pass
+
     todo = list(STUDIES) if args.only == "all" else args.only.split(",")
+    print(f"profile={args.profile} jobs={jobs} threads/worker={RUN['threads']} "
+          f"cache={'on' if args.cache else 'off'}", flush=True)
     t0 = time.time()
     for name in todo:
         print(f"\n===== STUDY: {name} ({args.profile}) =====", flush=True)
         STUDIES[name](args.profile)
+    write_provenance(args.profile, todo)
     print(f"\nALL DONE in {time.time()-t0:.0f}s. Results in {RESULTS}", flush=True)
 
 

@@ -43,18 +43,27 @@ def _action(env, ul_p, dl_p, beta, theta_g):
 
 def _greedy_phase(env, a_gains):
     """Pick group phases that co-phase the dominant cascade term per group,
-    maximizing sum_k |h_k|^2 approximately (cheap 1-shot alignment)."""
-    g, hr, hd = env.chan.true_channels()
-    G, M = env.G, env.M
-    theta_g = np.zeros(G)
-    # cascade contribution of group gp for user k: sum_{n in gp} hr[k,n]*g[n]
-    gr = g.reshape(G, M)
-    for gp in range(G):
-        # aggregate complex response of this group across users
-        resp = np.sum(hr[:, gp * M:(gp + 1) * M] * gr[gp][None, :], axis=1)  # (K,)
-        # choose phase to align the mean response (co-phasing)
-        theta_g[gp] = -np.angle(np.sum(resp))
-    return np.mod(theta_g, 2 * np.pi)
+    maximizing sum_k |h_k|^2 approximately (cheap 1-shot alignment).
+
+    The per-group cascade response ``sum_{n in gp} hr[k,n]*g[n]`` is exactly the
+    coefficient the env already caches once per fading block, so the old
+    per-group Python loop over slices collapses to one sum over users."""
+    C = env.chan.cascade_coeff()                 # (K,G), cached per fading block
+    return np.mod(-np.angle(C.sum(axis=0)), 2 * np.pi)
+
+
+def _composite_gain(env, a_gains, theta_g):
+    """|h_k|^2 for one world, via the cached per-group cascade coefficients."""
+    _, _, hd = env.chan.true_channels()
+    h = hd + env.chan.cascade_coeff() @ (a_gains * np.exp(1j * theta_g))
+    return h.real ** 2 + h.imag ** 2
+
+
+def _noise_floors(env, a_gains):
+    """Uplink/downlink amplifier-noise floors for one world, from cached
+    reductions rather than a fresh O(K*N) pass every slot."""
+    ul, dl = env.core._noise_floors(np.asarray(a_gains, float)[None, :])
+    return ul[0], dl[0]
 
 
 # --------------------------------------------------------------------------- #
@@ -107,11 +116,9 @@ def run_IFP(cfg, seed=0, steps=1000, inner=6):
         # Quadratic-transform FP on uplink powers for EE (queue-agnostic).
         p = np.full(env.K, env.Pk_max * 0.5)
         beta = np.full(env.K, 1.0 / env.K)
-        g, hr, hd = env.chan.true_channels()
-        a_elem = np.repeat(env.a_gains, env.M); th_elem = np.repeat(theta_g, env.M)
-        h2 = np.abs(hd + np.einsum('kn,n,n->k', hr, a_elem * np.exp(1j * th_elem), g)) ** 2
+        h2 = _composite_gain(env, env.a_gains, theta_g)
         W = beta * env.B
-        ul_ris, _ = env._noise_floors(env.a_gains, g, hr)
+        ul_ris, _ = _noise_floors(env, env.a_gains)
         n = W * (env.n0 + ul_ris)
         for _ in range(inner):
             sinr = p * h2 / np.maximum(n, 1e-30)
@@ -142,20 +149,18 @@ def run_DPP(cfg, seed=0, steps=1000):
         # Greedy RIS co-phasing at the (fixed) active gain.
         theta_g = _greedy_phase(env, env.a_gains)
         # Per-user power: minimize Q_k*(A - b_k) + V*energy  ~  choose p to
-        # balance queue drainage against energy. 1-D grid per user (cheap, robust).
-        g, hr, hd = env.chan.true_channels()
-        a_elem = np.repeat(env.a_gains, env.M); th_elem = np.repeat(theta_g, env.M)
-        h2 = np.abs(hd + np.einsum('kn,n,n->k', hr, a_elem * np.exp(1j * th_elem), g)) ** 2
+        # balance queue drainage against energy. 1-D grid per user (cheap, robust),
+        # evaluated for all users at once as a (K, grid) broadcast.
+        h2 = _composite_gain(env, env.a_gains, theta_g)
         W = beta * env.B
-        ul_ris, _ = env._noise_floors(env.a_gains, g, hr)
+        ul_ris, _ = _noise_floors(env, env.a_gains)
         n = W * (env.n0 + ul_ris)
-        grid = np.linspace(0.0, env.Pk_max, 9)[1:]
-        p = np.zeros(env.K)
-        for k in range(env.K):
-            rate = W[k] * np.log2(1 + grid * h2[k] / max(n[k], 1e-30))
-            served = np.minimum(env.alpha[k] * Q[k], rate * env.tau)
-            objective = Q[k] * served - V * (grid * env.tau)     # drift reduction - V*energy
-            p[k] = grid[int(np.argmax(objective))]
+        grid = np.linspace(0.0, env.Pk_max, 9)[1:]                     # (P,)
+        rate = W[:, None] * np.log2(
+            1 + grid[None, :] * h2[:, None] / np.maximum(n, 1e-30)[:, None])
+        served = np.minimum((env.alpha * Q)[:, None], rate * env.tau)   # (K,P)
+        objective = Q[:, None] * served - V * (grid[None, :] * env.tau)
+        p = grid[np.argmax(objective, axis=1)]
         a = _action(env, p, env.PBS_max, beta, theta_g)
         _, _, done, _, info = env.step(a); infos.append(info)
         if done: env.reset()

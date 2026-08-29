@@ -77,6 +77,11 @@ mec:
   F_max: 20.0e9        # total MEC CPU capacity [cycles/s]
   cycles_per_bit: 500  # omega: CPU cycles required per offloaded bit
   rho_out: 0.2         # output/input data ratio (downlink result size)
+  # MEC computation energy: kappa * f^2 per executed cycle, so
+  # E_comp = sum_k kappa f_k^2 omega b_k. 0.0 = transmit-only energy (the
+  # current metric), in which f_k affects latency only and never EE.
+  # ~1e-28 makes computation ~76% of the energy; see README.
+  compute_energy_kappa: 0.0
 
 queue:
   # Mean task arrival [bits/slot] (exponential); must stay < per-user capacity so
@@ -95,6 +100,13 @@ hierarchy:
   lambda_E: 1.0        # latency<->EE trade-off weight (swept for Pareto, R3.2)
   objective: "dpp"     # reward objective: {ee_latency, dinkelbach, dpp}
   dpp_V: 1.0           # Lyapunov drift-plus-penalty V parameter
+  # How the strategist's RIS-amplitude action is mapped to a_g.
+  # "feasible": onto [0, a_feasible], the largest uniform amplitude the RIS
+  #   power budget admits (1.71 here). "raw": onto [0, ris_amp_max] (=6.0),
+  #   where 71% of the range is clipped to the same saturated outcome and
+  #   PPO initializes inside that dead zone -- the strategist then adds
+  #   exactly 0.0% over a fixed default, because it never sees a gradient.
+  amp_action_scale: "feasible"
 
 vec:
   # Number of independent worlds advanced per numpy call / policy forward pass.
@@ -109,14 +121,17 @@ vec:
 
 training:
   seed: 0
-  low_timesteps: 200000    # tactician pre-training
-  meta_timesteps: 25000    # strategist training (in META-steps: each advances the
-                           # env by H slots, so this is 25000*H = 1.25M env slots)
-  # Flat-PPO baseline, matched to the hierarchy's ENVIRONMENT-interaction budget
-  # low_timesteps + H*meta_timesteps = 200000 + 50*25000 = 1450000. Anything less
-  # and the flat agent loses on experience rather than on architecture, which is
-  # the first thing a reviewer recomputes. experiments/run_all.py derives this
-  # automatically per profile; keep the two in step if you edit either.
+  # Split of the environment-interaction budget between the two levels.
+  # One tactician step = one gradient transition; one strategist step costs
+  # H slots for one transition. Measured at K=8 (README): HDRL EE rises
+  # steeply with the tactician budget and the strategist adds ~8% once it
+  # can learn at all, so most of the budget belongs to the fast level.
+  low_timesteps: 1000000   # tactician pre-training
+  meta_timesteps: 9000     # strategist (META-steps; 9000*H = 450k env slots)
+  # Flat-PPO baseline, matched to the hierarchy's ENVIRONMENT-interaction
+  # budget low_timesteps + H*meta_timesteps = 1000000 + 50*9000 = 1450000.
+  # Anything less and the flat agent loses on experience rather than on
+  # architecture. experiments/run_all.py derives this per profile.
   flat_timesteps: 1450000
   ppo:
     n_steps: 512

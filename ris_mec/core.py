@@ -78,6 +78,10 @@ class BatchedRISMEC:
         m = cfg["mec"]
         self.F_max = float(m["F_max"]); self.omega = float(m["cycles_per_bit"])
         self.rho_out = float(m["rho_out"])
+        # MEC computation energy: kappa * f^2 per executed cycle (standard CMOS
+        # dynamic-power model), i.e. E_comp = sum_k kappa * f_k^2 * omega * b_k.
+        # 0.0 reproduces the transmit-only energy metric.
+        self.kappa_c = float(m.get("compute_energy_kappa", 0.0))
 
         # Queue
         q = cfg["queue"]
@@ -99,6 +103,18 @@ class BatchedRISMEC:
         self.alpha = np.full((E, self.K), 0.5)
         self.f = np.full((E, self.K), self.F_max / self.K)
         self.a_gains = np.full((E, self.G), self.a_init if self.enable_amp else 1.0)
+
+        # Range the strategist's amplitude action is mapped onto. Using a_max
+        # is a trap: the global RIS power budget clips any uniform amplitude
+        # above a_feasible, so most of [0, a_max] collapses onto one saturated
+        # outcome in which the reward is flat in a_g -- PPO initializes inside
+        # that dead zone and never sees a gradient. Mapping onto the feasible
+        # range makes the whole interval do something. 'raw' restores the old
+        # behaviour.
+        self.amp_action_scale = str(
+            cfg.get('hierarchy', {}).get('amp_action_scale', 'feasible'))
+        self.a_scale = (self.a_feasible if self.amp_action_scale == 'feasible'
+                        else self.a_max)
 
         self.use_group_obs = self.chan.obs_group_features
         self.obs_dim = 4 * self.K + 1 + (3 * self.G if self.use_group_obs else 0)
@@ -131,6 +147,17 @@ class BatchedRISMEC:
             self._strategy_version += 1
 
     @property
+    def a_feasible(self):
+        """Largest uniform group amplitude the global RIS power budget admits.
+
+        From P_RIS = sum_g M (p_c + p_a a_g^2) <= P_RIS_max with a_g = a:
+        a = sqrt((P_RIS_max - G M p_c) / (G M p_a)), capped by a_max.
+        """
+        avail = max(self.P_ris_budget - self.M * self.pc * self.G, 0.0)
+        return float(min(self.a_max,
+                         np.sqrt(avail / max(self.G * self.M * self.pa, 1e-30))))
+
+    @property
     def meta_act_dim(self):
         return 2 * self.K + self.G      # alpha(K), f_logits(K), a_ctrl(G)
 
@@ -147,7 +174,7 @@ class BatchedRISMEC:
         fw /= fw.sum(axis=1, keepdims=True)
         f = fw * self.F_max
         if enable_ris:
-            a_ctrl = (a[:, 2 * K:2 * K + G] + 1) / 2.0 * self.a_max   # [0, a_max]
+            a_ctrl = (a[:, 2 * K:2 * K + G] + 1) / 2.0 * self.a_scale  # [0, a_scale]
         else:
             a_ctrl = np.ones((E, G))                                  # passive ablation
         self.set_strategy(alpha=alpha, f=f, a_gains=a_ctrl)
@@ -265,6 +292,10 @@ class BatchedRISMEC:
 
         # --- energy: uplink + downlink transmit + RIS power over the slot ---
         energy = self.tau * (ul_p.sum(axis=1) + dl_p + p_ris)             # (E,)
+        if self.kappa_c > 0.0:
+            # Charging the cycles actually executed makes f_k a genuine
+            # energy/latency decision rather than a free variable.
+            energy = energy + self.kappa_c * self.omega * (self.f ** 2 * bits_ul).sum(axis=1)
         total_bits = bits_ul.sum(axis=1)                                  # (E,)
         ee = total_bits / np.maximum(energy, 1e-12)
 

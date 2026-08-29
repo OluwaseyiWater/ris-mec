@@ -31,9 +31,9 @@ from experiments.common import (aggregate, aggregate_many, run_method, save_json
 # comparison, and the first thing a reviewer recomputes. `_budget_parity` below
 # recomputes it from the config's H so the two stay locked together.
 PROFILES = {
-    "fast":    dict(low=4000,  meta=2000,  seeds=[0],       Ks=[4, 6, 8],        eval=400),
-    "reduced": dict(low=6000,  meta=2500,  seeds=[0, 1],    Ks=[4, 6, 8, 10],    eval=800),
-    "full":    dict(low=200000, meta=25000, seeds=[0,4,10,16,24,42,50,64,100,128,200,256,480,512,1024], Ks=[4,6,8,10,12,16,32,64], eval=2000),
+    "fast":    dict(low=20000,  meta=200,  seeds=[0],    Ks=[4, 6, 8],     eval=400),
+    "reduced": dict(low=100000, meta=620,  seeds=[0, 1], Ks=[4, 6, 8, 10], eval=800),
+    "full":    dict(low=1000000, meta=9000, seeds=[0,4,10,16,24,42,50,64,100,128,200,256,480,512,1024], Ks=[4,6,8,10,12,16,32,64], eval=2000),
 }
 
 
@@ -42,7 +42,13 @@ def _budget_parity(p, H):
     return int(p["low"]) + int(H) * int(p["meta"])
 
 # Filled in by main(); studies read them for their fan-out.
-RUN = {"jobs": 1, "threads": 0}
+# fixed_total_load: when > 0, per-user arrivals are set to load/K so the total
+# offered load does not grow with K. Without it the k_sweep runs into
+# congestion collapse: the radio capacity is fixed by B, so served bits
+# saturate near 2.5e6 bits/slot and the system is overloaded beyond K ~ 13
+# (measured: 94% of offered load served at K=16, 68% at K=24, 52% at K=32).
+# Past that point the sweep measures congestion, not controller scalability.
+RUN = {"jobs": 1, "threads": 0, "fixed_total_load": 0.0}
 
 
 def make_cfg(profile, **over):
@@ -58,6 +64,9 @@ def make_cfg(profile, **over):
         d[ks[-1]] = val
     # After the overrides, so an H sweep keeps the flat baseline matched.
     cfg["training"]["flat_timesteps"] = _budget_parity(p, cfg["hierarchy"]["H"])
+    if RUN.get("fixed_total_load", 0.0) > 0:
+        cfg["queue"]["arrival_mean_bits"] = (
+            float(RUN["fixed_total_load"]) / int(cfg["system"]["K"]))
     return cfg, p
 
 
@@ -303,6 +312,12 @@ def main():
                          "0 = one per CPU core.")
     ap.add_argument("--threads", type=int, default=1,
                     help="torch threads per worker; keep jobs*threads <= cores")
+    ap.add_argument("--fixed-total-load", type=float, default=0.0,
+                    help="hold the TOTAL offered load fixed at this many bits/slot "
+                         "by setting per-user arrivals to load/K. Without it the "
+                         "sweep saturates near K=13 and large-K points measure "
+                         "congestion rather than controller scalability. "
+                         "1.2e6 reproduces the K=8 load.")
     ap.add_argument("--cache", action="store_true",
                     help="reuse trained models across studies and reruns "
                          f"(results/model_cache/)")
@@ -310,6 +325,7 @@ def main():
 
     jobs = args.jobs if args.jobs > 0 else (os.cpu_count() or 1)
     RUN["jobs"], RUN["threads"] = jobs, max(1, args.threads)
+    RUN["fixed_total_load"] = args.fixed_total_load
     configure(cache=args.cache)
     if jobs == 1:
         # Single-process: let torch use the box, nothing else is competing.

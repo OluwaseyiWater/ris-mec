@@ -279,6 +279,71 @@ be re-run. `ris_steering: false` reproduces the old model exactly, and the golde
 trajectories in `tests/golden/` are pinned to it so they keep testing the
 vectorization rather than the physics.
 
+## Why the strategist was contributing nothing (`hierarchy.amp_action_scale`)
+
+The strategist's RIS-amplitude action was mapped onto `[0, ris_amp_max] = [0, 6]`.
+But the global RIS power budget admits at most a uniform
+
+```
+a_feasible = sqrt((P_RIS_max - G M p_c) / (G M p_a)) = 1.71
+```
+
+so **71% of the action range collapses onto one saturated outcome** (`P_RIS`
+pinned at the 2.0 W budget) in which the reward is flat in `a_g`. PPO initializes
+at action ~0, i.e. `a_ctrl = 3.0` — *inside* that dead zone, where it sees no
+gradient. The chance that random exploration puts all `G=8` groups below the cap
+at once is 4.4e-5.
+
+Measured consequence, at K=8 over a fixed environment budget:
+
+| `amp_action_scale` | HDRL EE | tactician-only EE | strategist adds | `a_mean` |
+|---|---|---|---|---|
+| `raw` (old) | 33.87 | 33.86 | **+0.0%** | 1.71 (pinned) |
+| `feasible` | 65.15 | 36.15 | **+80%** | 0.84 |
+
+The strategist was not powerless — it was *blind*. Below the cap sits a large
+gain: holding `a_g = 0.5` instead of the saturated 1.71 raises EE by **1.88x**
+(`P_RIS` 2.0 W -> 0.29 W) for +10% latency. That is precisely the
+latency-versus-energy lever the paper attributes to slow-timescale amplitude
+control, and it was unreachable.
+
+Mapping the action onto `[0, a_feasible]` fixes it. Note this is *not* purely a
+gain: a single group could legally exceed 1.71 if the others were near zero
+(`a <= 4.84`), so the feasible cap slightly restricts extreme non-uniform
+configurations. A fully expressive alternative is to let the strategist choose the
+group *shape* and the total RIS power fraction separately. `raw` restores the old
+behaviour.
+
+Separating initialization from learning (tactician fixed at 1e5 steps, K=8):
+
+| strategist budget | EE | `a_mean` |
+|---|---|---|
+| untrained (0 updates) | 74.66 | 0.855 |
+| 1,000 | 75.74 | 0.837 |
+| 12,000 | **80.37** | 0.755 |
+
+So most of the jump is the rescaled action's *operating point*, and a further
+**+7.6%** is genuine strategist learning — it keeps backing `a_g` off.
+
+## Splitting the budget between the two levels
+
+Under environment-slot parity `E_F = E_L + H E_H`, the flat agent turns every slot
+into a gradient transition while the strategist spends `H` slots per transition.
+Allocating most of the budget to the strategist therefore **starves the
+tactician**, which controls the downlink power that dominates the energy. At
+B=131,000 env slots, K=8:
+
+| `low` | `meta` | HDRL EE |
+|---|---|---|
+| 20,000 | 2,220 | 35.57 |
+| 70,000 | 1,220 | 49.35 |
+| 115,000 | 320 | **75.42** |
+
+against Flat PPO's 60.76 at the same B. The profiles now give most of the budget
+to the fast level. This matters more than it sounds: an earlier split of
+`low=6,000 / meta=2,500` put HDRL at 23.5 against Flat's 33.1 — a spurious
+"hierarchy loses" result caused entirely by the allocation, not the architecture.
+
 ### Companion change: `queue.arrival_mean_bits` 3.0e5 → 1.5e5
 
 Under the old model the RIS cascade combined coherently by default, which is what

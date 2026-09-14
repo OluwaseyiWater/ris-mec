@@ -27,7 +27,7 @@ def check_env_physics():
         infos.append(info)
         if done:
             obs, _ = env.reset()
-    s = summarize(infos)
+    s = summarize(infos, env.K, env.tau, env.arrival_mean)
     print("[env] random-action summary:", {k: round(v, 4) for k, v in s.items()})
 
     # Amplification sanity: higher a_g should raise both signal gain AND noise floor.

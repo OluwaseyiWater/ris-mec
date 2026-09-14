@@ -75,6 +75,7 @@ the training-relevant config plus seed, so reruns and overlapping studies (the
 | `ablation` | active-vs-passive RIS, H sweep, G sweep | `fig_ablation` |
 | `pareto` | latency–EE Pareto by sweeping λ_E | `fig_pareto` |
 | `robustness` | imperfect CSI, RIS phase quantization | `fig_robustness` |
+| `lyapunov` | drift-plus-penalty trade-off: sweep V | `fig_lyapunov` |
 
 ## Vectorization
 
@@ -372,6 +373,72 @@ are held fixed, and `batch_size` is scaled by `n_envs` (`vec.scale_batch`) so th
 number of gradient steps per environment sample is also unchanged — each gradient
 is simply estimated from a proportionally larger, lower-variance batch. Set
 `vec.scale_batch: false` to keep the original minibatch size instead.
+
+## The reported latency excluded queueing delay
+
+`summarize()` reported `latency` = `t_ul + t_dl + t_cmp`, i.e. the *service* time
+of the bits that actually got sent in a slot. It said nothing about how long a
+task waited first. A controller that lets its backlog grow therefore **scores
+better** on that metric while serving its users worse, which is exactly backwards.
+
+`summarize()` now also reports, via Little's law taken per UE
+(`W = Q_k / throughput_k`):
+
+| key | meaning |
+|---|---|
+| `latency` | service time only (unchanged, kept for continuity) |
+| `delay_queue` | queueing delay |
+| `delay_total` | `latency + delay_queue` — what a user experiences |
+| `throughput` | served bits per slot |
+| `served_ratio` | `throughput / (K * arrival_mean)` |
+
+`served_ratio` is the one to check first. EE is bits/energy, so it can always be
+raised by serving *fewer* bits; two controllers that are both under-serving will
+converge on the same EE for reasons that have nothing to do with either of them.
+A full-profile run where `served_ratio` is 0.16 is not a measurement of control
+quality, it is a measurement of the radio capacity.
+
+## The Lyapunov drift term did not bind (`hierarchy.drift_norm`)
+
+The drift was normalized by `q_norm` **twice** — once for the backlog and once
+for the unserved arrivals — leaving it orders of magnitude below the `V*EE` term
+at the backlogs actually reached:
+
+| backlog Q | drift term | `V*ee_n` (V=1) | ratio |
+|---|---|---|---|
+| 2.5e5 | 0.0037 | 9.00 | **2400x** |
+| 1.16e7 | 0.174 | 9.00 | **52x** |
+
+Queue growth was effectively free, so the agent maximized bits/energy by refusing
+to serve — and it got *worse* with training: the tactician served **96%** of
+offered load at `low=100k` but only **70%** at `low=1M`. More optimization, more
+metric gaming. The O(V) queue bound the analysis promises never materialized.
+
+`drift_norm: "queue_arrival"` (default) scales the backlog by `q_norm` and the
+unserved arrivals by the mean arrival, so both factors are O(1) at the design
+point and the two halves of the drift-plus-penalty are commensurate. `V` then
+recovers its intended role. `"legacy"` reproduces the old reward.
+
+### `--only lyapunov`: the trade-off, measured
+
+The new study sweeps `V` and traces the curve the analysis predicts (K=8,
+`reduced`, 2 seeds):
+
+| `V` | EE (Mbit/J) | mean backlog | `served_ratio` | total delay |
+|---|---|---|---|---|
+| 0.03 | 33.64 | 6.54e5 | 0.97x | 0.084 s |
+| 0.1 | 43.98 | 7.07e5 | 0.97x | 0.088 s |
+| 0.3 | 57.46 | 7.96e5 | 0.96x | 0.095 s |
+| 1.0 | **65.74** | 8.55e5 | 0.96x | 0.100 s |
+| 3.0 | 62.71 | 8.69e5 | 0.96x | 0.101 s |
+| 10.0 | 48.94 | 8.70e5 | 0.96x | 0.101 s |
+
+Backlog rises monotonically with `V` — the O(V) bound — while `served_ratio`
+stays at 0.96-0.97 throughout, i.e. the agent is no longer buying EE by
+under-serving. EE peaks near `V=1` and falls beyond it, where the reward scale
+starts to destabilize PPO. This turns an asserted property of the reward into a
+measured one, and is the natural figure to pair with the drift-plus-penalty
+analysis.
 
 ## Config knobs worth knowing
 

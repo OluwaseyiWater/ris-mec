@@ -33,7 +33,7 @@ from experiments.common import (aggregate, aggregate_many, run_method, save_json
 PROFILES = {
     "fast":    dict(low=20000,  meta=200,  seeds=[0],    Ks=[4, 6, 8],     eval=400),
     "reduced": dict(low=100000, meta=620,  seeds=[0, 1], Ks=[4, 6, 8, 10], eval=800),
-    "full":    dict(low=1000000, meta=9000, seeds=[0,4,10,16,24,42,50,64,100,128,200,256,480,512,1024], Ks=[4,6,8,10,12,16,32,64], eval=2000),
+    "full":    dict(low=1000000, meta=9000, seeds=[0,10,16,24,32,42,64,100,128,256], Ks=[4,6,8,10,12,16], eval=2000),
 }
 
 
@@ -298,8 +298,73 @@ def plot_robustness(rows, profile):
     plt.close(fig)
 
 
+# ======================================================================= #
+#  Study 5: Lyapunov trade-off (sweep V)
+# ======================================================================= #
+def study_lyapunov(profile):
+    """Trace the drift-plus-penalty trade-off the analysis predicts.
+
+    Reward = -drift + V*(EE term) - V*lambda_E*L, so V is the knob between queue
+    stability and efficiency: the theory gives an O(1/V) optimality gap bought
+    with an O(V) queue bound. This study is what turns that from an asserted
+    property into a measured one -- and it is also the check that the agent is
+    not "winning" on EE simply by refusing to serve its users, which shows up
+    here as served_ratio falling below 1 as V grows.
+    """
+    p = PROFILES[profile]
+    Vs = [0.03, 0.1, 0.3, 1.0, 3.0, 10.0]
+    specs = []
+    for V in Vs:
+        cfg, _ = make_cfg(profile, **{"system.K": 8, "hierarchy.dpp_V": V})
+        specs.append((V, "HDRL", clone_cfg(cfg), p["seeds"]))
+    t0 = time.time()
+    aggs = aggregate_many(specs, jobs=RUN["jobs"], threads=RUN["threads"],
+                          progress=_progress("lyapunov", t0))
+    rows = []
+    for agg in aggs:
+        agg["V"] = agg.pop("_label")
+        rows.append(agg)
+        print(f"[lyapunov] V={agg['V']:<5g} EE={agg['ee_mbit_j']:7.2f} "
+              f"queue={agg['queue_mean']:.2e} served={agg['served_ratio']:.2f}x "
+              f"delay={agg['delay_total']:.4f}s", flush=True)
+    save_json("lyapunov.json", rows)
+    pd.DataFrame(rows).to_csv(os.path.join(RESULTS, "lyapunov.csv"), index=False)
+    plot_lyapunov(rows, profile)
+    return rows
+
+
+def plot_lyapunov(rows, profile):
+    apply_style()
+    df = pd.DataFrame(rows).sort_values("V")
+    fig, axes = plt.subplots(1, 2, figsize=(7.0, 2.8))
+
+    ax = axes[0]
+    st = style_for("HDRL")
+    ax.errorbar(df["V"], df["ee_mbit_j"], yerr=df["ee_mbit_j_ci"], capsize=2, **st)
+    ax.set_xscale("log"); ax.set_xlabel("Lyapunov weight $V$")
+    ax.set_ylabel("Energy efficiency (Mbit/J)", color=st.get("color"))
+    ax2 = ax.twinx()
+    ax2.errorbar(df["V"], df["queue_mean"], yerr=df["queue_mean_ci"], capsize=2,
+                 **style_for("DPP"))
+    ax2.set_ylabel("Mean backlog (bits)", color=style_for("DPP").get("color"))
+    ax2.set_yscale("log")
+
+    ax = axes[1]
+    ax.errorbar(df["delay_total"], df["ee_mbit_j"],
+                xerr=df["delay_total_ci"], yerr=df["ee_mbit_j_ci"], capsize=2, **st)
+    for _, r in df.iterrows():
+        ax.annotate(f"$V$={r['V']:g}", (r["delay_total"], r["ee_mbit_j"]),
+                    fontsize=5.5, xytext=(2, 2), textcoords="offset points")
+    ax.set_xlabel("End-to-end delay (s)"); ax.set_ylabel("Energy efficiency (Mbit/J)")
+    fig.tight_layout()
+    for ext in ("pdf", "png"):
+        fig.savefig(os.path.join(RESULTS, f"fig_lyapunov.{ext}"))
+    plt.close(fig)
+
+
 STUDIES = {"k_sweep": study_k_sweep, "ablation": study_ablation,
-           "pareto": study_pareto, "robustness": study_robustness}
+           "pareto": study_pareto, "robustness": study_robustness,
+           "lyapunov": study_lyapunov}
 
 
 def main():

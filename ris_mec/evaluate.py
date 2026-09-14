@@ -32,7 +32,7 @@ def evaluate_hdrl(cfg, low, meta, seed=0, steps=1000, enable_ris=True) -> dict:
         infos.append(info)
         if done:
             obs, _ = env.reset()
-    return summarize(infos)
+    return summarize(infos, env.K, env.tau, env.arrival_mean)
 
 
 def evaluate_flat(cfg, flat, seed=0, steps=1000) -> dict:
@@ -45,4 +45,5 @@ def evaluate_flat(cfg, flat, seed=0, steps=1000) -> dict:
         infos.append(info)
         if done:
             obs, _ = fenv.reset()
-    return summarize(infos)
+    e = fenv.env
+    return summarize(infos, e.K, e.tau, e.arrival_mean)

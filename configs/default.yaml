@@ -99,7 +99,17 @@ hierarchy:
   H: 50                # meta-controller (strategist) period in slots
   lambda_E: 1.0        # latency<->EE trade-off weight (swept for Pareto, R3.2)
   objective: "dpp"     # reward objective: {ee_latency, dinkelbach, dpp}
-  dpp_V: 1.0           # Lyapunov drift-plus-penalty V parameter
+  # Lyapunov drift-plus-penalty knob: reward = -drift + V*(EE term) - V*lambda_E*L,
+  # so LARGER V weights efficiency and SMALLER V weights queue stability.
+  # The theory gives an O(1/V) optimality gap against an O(V) queue bound;
+  # experiments/run_all.py --only lyapunov traces that curve empirically.
+  dpp_V: 1.0
+  # Drift normalization. "queue_arrival" scales backlog by q_norm and
+  # unserved arrivals by the mean arrival, so drift and the V*EE term are
+  # commensurate. "legacy" divides by q_norm twice, leaving drift 52-2400x
+  # smaller than the EE term -- backlog growth is then unpenalized and the
+  # agent maximizes bits/energy by under-serving its users.
+  drift_norm: "queue_arrival"
   # How the strategist's RIS-amplitude action is mapped to a_g.
   # "feasible": onto [0, a_feasible], the largest uniform amplitude the RIS
   #   power budget admits (1.71 here). "raw": onto [0, ris_amp_max] (=6.0),

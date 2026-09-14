@@ -78,7 +78,7 @@ def run_AO(cfg, seed=0, steps=1000):
         a = rng.uniform(-0.5, 0.5, env.action_space.shape[0])
         _, _, done, _, info = env.step(a); infos.append(info)
         if done: env.reset()
-    return summarize(infos)
+    return summarize(infos, env.K, env.tau, env.arrival_mean)
 
 
 def run_SCA(cfg, seed=0, steps=1000):
@@ -89,7 +89,7 @@ def run_SCA(cfg, seed=0, steps=1000):
         a = np.zeros(env.action_space.shape[0])
         _, _, done, _, info = env.step(a); infos.append(info)
         if done: env.reset()
-    return summarize(infos)
+    return summarize(infos, env.K, env.tau, env.arrival_mean)
 
 
 def run_FP(cfg, seed=0, steps=1000):
@@ -101,7 +101,7 @@ def run_FP(cfg, seed=0, steps=1000):
         a = rng.uniform(-1, 1, env.action_space.shape[0])
         _, _, done, _, info = env.step(a); infos.append(info)
         if done: env.reset()
-    return summarize(infos)
+    return summarize(infos, env.K, env.tau, env.arrival_mean)
 
 
 # --------------------------------------------------------------------------- #
@@ -130,7 +130,7 @@ def run_IFP(cfg, seed=0, steps=1000, inner=6):
         a = _action(env, p, env.PBS_max, beta, theta_g)
         _, _, done, _, info = env.step(a); infos.append(info)
         if done: env.reset()
-    return summarize(infos)
+    return summarize(infos, env.K, env.tau, env.arrival_mean)
 
 
 # --------------------------------------------------------------------------- #
@@ -164,7 +164,7 @@ def run_DPP(cfg, seed=0, steps=1000):
         a = _action(env, p, env.PBS_max, beta, theta_g)
         _, _, done, _, info = env.step(a); infos.append(info)
         if done: env.reset()
-    return summarize(infos)
+    return summarize(infos, env.K, env.tau, env.arrival_mean)
 
 
 BASELINES = {

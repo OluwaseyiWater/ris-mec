@@ -28,6 +28,7 @@ REFERENCE_PINS = {
     "channel.obs_group_features": False,
     # physics (check_steering), with its companion link-budget parameter
     "geometry.ris_steering": False,
+    "hierarchy.drift_norm": "legacy",
     "queue.arrival_mean_bits": 3.0e5,
 }
 

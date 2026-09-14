@@ -46,6 +46,11 @@ class RewardObjective:
         self.lambda_E = float(h.get("lambda_E", 1.0))
         self.V = float(h.get("dpp_V", 1.0))
         self.q_norm = float(cfg["queue"]["q_norm"])
+        self.arrival_mean = float(cfg["queue"]["arrival_mean_bits"])
+        # How the Lyapunov drift is normalized. See __call__.
+        self.drift_norm = str(h.get("drift_norm", "queue_arrival"))
+        if self.drift_norm not in ("queue_arrival", "legacy"):
+            raise ValueError(f"unknown hierarchy.drift_norm '{self.drift_norm}'")
         self.n_envs = int(n_envs)
         # EE scale so normalized EE ~ O(1) (system EE is tens of Mbit/J).
         self.ee_scale = 1.0e7
@@ -70,7 +75,23 @@ class RewardObjective:
         # "dpp": P1 maximizes (eta - lambda_E * L); the DPP cost to MINIMIZE is
         # therefore (lambda_E * L - eta). Keeping lambda_E on latency makes the
         # per-step surrogate consistent with P1 (fixes the lambda_E inversion).
+        #
+        # Normalization of the drift decides whether queue stability binds at all.
+        # "legacy" divides by q_norm TWICE -- once for the backlog and once more
+        # for the unserved arrivals -- which at the realized operating point makes
+        # the drift 52-2400x smaller than the V*EE term. Backlog growth is then
+        # effectively free: EE = bits/energy can always be raised by serving less,
+        # so the agent learns to under-serve and the O(V) queue bound the theory
+        # promises never materializes.
+        #
+        # "queue_arrival" scales the backlog by q_norm and the unserved arrivals
+        # by the mean arrival, so each factor is O(1) at the design point and the
+        # two terms of the drift-plus-penalty are commensurate. V then recovers
+        # its intended role as the stability/efficiency knob.
         qn = s.queues / self.q_norm
-        drift = (qn * (s.arrivals - s.served) / self.q_norm).mean(axis=1)
+        if self.drift_norm == "legacy":
+            drift = (qn * (s.arrivals - s.served) / self.q_norm).mean(axis=1)
+        else:
+            drift = (qn * ((s.arrivals - s.served) / self.arrival_mean)).mean(axis=1)
         penalty = self.lambda_E * lat - ee_n
         return -(drift + self.V * penalty) + s.qos_penalty

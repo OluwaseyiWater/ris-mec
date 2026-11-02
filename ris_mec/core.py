@@ -78,6 +78,13 @@ class BatchedRISMEC:
         m = cfg["mec"]
         self.F_max = float(m["F_max"]); self.omega = float(m["cycles_per_bit"])
         self.rho_out = float(m["rho_out"])
+        # Result return. Each offloaded bit owes rho_out bits of result on the
+        # downlink. With result_queue on, owed results accumulate in a per-UE
+        # result queue drained by the downlink, so a controller that switches the
+        # downlink off pays for it in delay and in the drift term. Off reproduces
+        # the old model, where results the downlink could not carry were silently
+        # dropped -- the learned agents found that and set P_dl = 0.
+        self.result_queue = bool(m.get("result_queue", True))
         # MEC computation energy: kappa * f^2 per executed cycle (standard CMOS
         # dynamic-power model), i.e. E_comp = sum_k kappa * f_k^2 * omega * b_k.
         # 0.0 reproduces the transmit-only energy metric.
@@ -116,12 +123,26 @@ class BatchedRISMEC:
         self.a_scale = (self.a_feasible if self.amp_action_scale == 'feasible'
                         else self.a_max)
 
+        # Downlink-power action mapping. Returning results takes milliwatts
+        # (measured: ~7 mW at K=8) against a 5 W cap, so on a linear map the
+        # useful region is ~0.1% of the action range and PPO starts at 2.5 W;
+        # the learned tactician then burned ~2.7 W where 7 mW sufficed. "db" maps
+        # the action onto [P_max - dl_power_range_db, P_max] in decibels, the
+        # usual parameterization for power control. "linear" = the old map.
+        h = cfg.get("hierarchy", {})
+        self.dl_action = str(h.get("dl_power_action", "db"))
+        if self.dl_action not in ("db", "linear"):
+            raise ValueError(f"unknown hierarchy.dl_power_action '{self.dl_action}'")
+        self.dl_range_db = float(h.get("dl_power_range_db", 60.0))
+
         self.use_group_obs = self.chan.obs_group_features
-        self.obs_dim = 4 * self.K + 1 + (3 * self.G if self.use_group_obs else 0)
+        self.obs_dim = (4 * self.K + 1 + (3 * self.G if self.use_group_obs else 0)
+                        + (self.K if self.result_queue else 0))
         self.act_dim = 2 * self.K + 1 + self.G
 
         self.t = 0
         self.queues = self.rng.exponential(self.arrival_mean, size=(E, self.K))
+        self.rqueues = np.zeros((E, self.K))       # owed results [bits]; no RNG draw
         self.last_h2 = np.ones((E, self.K))
 
         # Memo for the active-RIS amplitude constraint, invalidated whenever the
@@ -145,6 +166,21 @@ class BatchedRISMEC:
             a = np.clip(np.asarray(a_gains, float), 0.0, self.a_max).reshape(E, self.G)
             self.a_gains = a if self.enable_amp else np.ones((E, self.G))
             self._strategy_version += 1
+
+    def decode_dl(self, a):
+        """Downlink power [W] from an action component in [-1, 1]."""
+        a = np.asarray(a, float)
+        if self.dl_action == "linear":
+            return (a + 1) * (0.5 * self.PBS_max)
+        return self.PBS_max * 10.0 ** (((a + 1) * 0.5 - 1.0) * self.dl_range_db / 10.0)
+
+    def encode_dl(self, p):
+        """Inverse of decode_dl, clipped to [-1, 1] (used by the baselines)."""
+        p = np.asarray(p, float)
+        if self.dl_action == "linear":
+            return np.clip(p / self.PBS_max, 0, 1) * 2 - 1
+        frac = 1.0 + 10.0 * np.log10(np.maximum(p, 1e-300) / self.PBS_max) / self.dl_range_db
+        return np.clip(frac, 0.0, 1.0) * 2 - 1
 
     @property
     def a_feasible(self):
@@ -240,6 +276,7 @@ class BatchedRISMEC:
             self.chan = ChannelModel(self.cfg, self.rng, n_envs=E)
         self.t = 0
         self.queues = self.rng.exponential(self.arrival_mean, size=(E, self.K))
+        self.rqueues = np.zeros((E, self.K))
         self.alpha = np.full((E, self.K), 0.5)
         self.f = np.full((E, self.K), self.F_max / self.K)
         self.a_gains = np.full((E, self.G), self.a_init if self.enable_amp else 1.0)
@@ -259,7 +296,7 @@ class BatchedRISMEC:
 
         # --- decode tactical action ---
         ul_p = (a[:, :K] + 1) * (0.5 * self.Pk_max)                       # (E,K)
-        dl_p = (a[:, K] + 1) * (0.5 * self.PBS_max)                       # (E,)
+        dl_p = self.decode_dl(a[:, K])                                    # (E,)
         beta_logits = a[:, K + 1:2 * K + 1]
         beta = np.exp(beta_logits - beta_logits.max(axis=1, keepdims=True))
         beta /= beta.sum(axis=1, keepdims=True)                           # (E,K)
@@ -284,7 +321,15 @@ class BatchedRISMEC:
         # --- offloading, latency (bits limited by rate over the slot) ---
         demand_ul = self.alpha * self.queues
         bits_ul = np.minimum(demand_ul, R_ul * self.tau)
-        bits_dl = np.minimum(self.rho_out * self.alpha * self.queues, R_dl * self.tau)
+        owed = self.rho_out * bits_ul                                     # (E,K)
+        if self.result_queue:
+            pending = self.rqueues + owed
+            bits_dl = np.minimum(pending, R_dl * self.tau)
+            self.rqueues = pending - bits_dl
+            delivered = bits_dl
+        else:
+            bits_dl = np.minimum(self.rho_out * self.alpha * self.queues, R_dl * self.tau)
+            delivered = np.minimum(bits_dl, owed)
         t_ul = bits_ul / np.maximum(R_ul, 1e-9)
         t_dl = bits_dl / np.maximum(R_dl, 1e-9)
         t_cmp = (bits_ul * self.omega) / np.maximum(self.f, 1e-9)
@@ -306,7 +351,9 @@ class BatchedRISMEC:
 
         # --- reward via objective ---
         stats = StepStats(bits=total_bits, energy=energy, latency=latency, ee=ee,
-                          queues=self.queues, arrivals=arrivals, served=served)
+                          queues=self.queues, arrivals=arrivals, served=served,
+                          rqueues=self.rqueues if self.result_queue else None,
+                          owed=owed, delivered=delivered)
         reward = self.reward_obj(stats)                                   # (E,)
 
         # --- advance channels & time ---
@@ -317,6 +364,13 @@ class BatchedRISMEC:
             "latency": latency, "energy": energy, "bits": total_bits, "ee": ee,
             "p_ris": p_ris, "queue_mean": self.queues.mean(axis=1),
             "a_mean": a_gains.mean(axis=1),
+            # Result return (see result_queue in __init__). With the queue off,
+            # undeliverable results are dropped, so delivery is measured
+            # explicitly rather than assumed.
+            "dl_power": dl_p,
+            "dl_owed": owed.sum(axis=1),
+            "dl_delivered": delivered.sum(axis=1),
+            "rqueue_mean": self.rqueues.mean(axis=1),
         }
         return self.obs(), reward, done, info
 
@@ -341,8 +395,14 @@ class BatchedRISMEC:
         out[:, 2 * K:3 * K] = self.alpha
         out[:, 3 * K:4 * K] = self.f / self.F_max
         out[:, 4 * K] = self.t / self.max_steps
+        c = 4 * K + 1
         if self.use_group_obs:
-            out[:, 4 * K + 1:] = self.chan.group_feature()                # (E,3G)
+            out[:, c:c + 3 * self.G] = self.chan.group_feature()          # (E,3G)
+            c += 3 * self.G
+        if self.result_queue:
+            # Owed-result backlog, so the tactician can see what its downlink
+            # power is (not) draining.
+            np.clip(self.rqueues / (self.rho_out * self.q_norm), 0, 1, out=out[:, c:c + K])
         return out
 
     # ================================================================== #

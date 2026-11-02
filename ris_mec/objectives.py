@@ -35,6 +35,9 @@ class StepStats:
     arrivals: np.ndarray  # (E,K)  arrivals this slot [bits]
     served: np.ndarray    # (E,K)  bits served (uplink) this slot [bits]
     qos_penalty: float = 0.0
+    rqueues: np.ndarray = None    # (E,K) owed-result backlog after update, or None
+    owed: np.ndarray = None       # (E,K) results owed this slot [bits]
+    delivered: np.ndarray = None  # (E,K) results delivered this slot [bits]
 
 
 class RewardObjective:
@@ -47,6 +50,7 @@ class RewardObjective:
         self.V = float(h.get("dpp_V", 1.0))
         self.q_norm = float(cfg["queue"]["q_norm"])
         self.arrival_mean = float(cfg["queue"]["arrival_mean_bits"])
+        self.rho_out = float(cfg["mec"]["rho_out"])
         # How the Lyapunov drift is normalized. See __call__.
         self.drift_norm = str(h.get("drift_norm", "queue_arrival"))
         if self.drift_norm not in ("queue_arrival", "legacy"):
@@ -93,5 +97,13 @@ class RewardObjective:
             drift = (qn * (s.arrivals - s.served) / self.q_norm).mean(axis=1)
         else:
             drift = (qn * ((s.arrivals - s.served) / self.arrival_mean)).mean(axis=1)
+            if s.rqueues is not None:
+                # The result queue is a second queue in the same Lyapunov function,
+                # normalized the same way at its own scale (results are rho_out x
+                # the offloaded bits), so an undrained downlink is not free.
+                rs = self.rho_out
+                drift = drift + ((s.rqueues / (rs * self.q_norm))
+                                 * ((s.owed - s.delivered) / (rs * self.arrival_mean))
+                                 ).mean(axis=1)
         penalty = self.lambda_E * lat - ee_n
         return -(drift + self.V * penalty) + s.qos_penalty

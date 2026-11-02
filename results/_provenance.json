@@ -1,9 +1,13 @@
 {
-  "profile": "reduced",
+  "profile": "full",
   "studies": [
+    "k_sweep",
+    "ablation",
+    "pareto",
+    "robustness",
     "lyapunov"
   ],
-  "config_sha": "301450dd2184130a",
-  "git_commit": "7ea8edc",
-  "utc": "2026-09-12T12:32:55Z"
+  "config_sha": "691c503567ac9b01",
+  "git_commit": "c7bff7f",
+  "utc": "2026-09-14T22:30:26Z"
 }

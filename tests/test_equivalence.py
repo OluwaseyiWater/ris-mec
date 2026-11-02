@@ -133,6 +133,7 @@ def check_obs_normalization():
         cfg["channel"]["obs_gain_norm"] = norm
         cfg["channel"]["csi_error_std"] = csi
         cfg["channel"]["obs_group_features"] = grp
+        cfg["mec"]["result_queue"] = False      # this check is about the channel block
         core = BatchedRISMEC(cfg, n_envs=64, seed=seed)
         core.reset()
         return core

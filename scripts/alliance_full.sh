@@ -53,6 +53,7 @@ srun python -m experiments.run_all \
     --profile full \
     --jobs "${SLURM_CPUS_PER_TASK}" \
     --threads 1 \
+    --auto-v \
     --cache
 
 echo "finished=$(date -Is)"

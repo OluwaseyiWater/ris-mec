@@ -39,12 +39,6 @@ geometry:                  # reference-distance pathloss geometry (meters), RIS-
   ue_ris_min: 5.0          # min UE<->RIS distance [m]
   ue_ris_max: 25.0         # max UE<->RIS distance [m]
   rician_k_db: 5.0         # Rician K-factor for RIS links [dB]
-  # --- RIS array response (steering phase of the LoS component) ---
-  # The LoS term of a RIS link is an array response vector, not a scalar:
-  #   a_n(phi) = exp(-j*2*pi*(d/lambda)*n*sin(phi))   for a uniform linear array.
-  # false reproduces the pre-fix scalar LoS, which asserts sin(phi)=0 on both hops
-  # (RIS broadside to the BS and to every UE at once) and leaves the elements
-  # already co-phased, so RIS phase control has almost nothing to do.
   ris_steering: true
   ris_element_spacing: 0.5   # d/lambda; 0.5 = half-wavelength ULA
   bs_ris_angle_deg: -30.0    # RIS -> BS departure angle (fixed deployment)
@@ -56,41 +50,19 @@ channel:
   csi_error_std: 0.0       # Gaussian CSI estimation error std (0 = perfect); robustness sweep
   phase_bits: 0            # RIS phase quantization bits (0 = continuous); robustness sweep
   csi_delay_slots: 0       # delayed CSI (0 = up to date); robustness sweep
-  # --- observation scaling of the composite channel gain ---
-  # "db": clip((10*log10(gain) - lo)/(hi - lo), 0, 1). Channel gain is a log-scale
-  #       quantity; the dB window below covers the measured range for this geometry
-  #       (raw gain spans about -120.5 dB to -79 dB) with no clipping.
-  # "legacy": gain/(1+gain). Reproduces pre-fix runs, but since gain ~1e-11 this is
-  #       the identity, so the feature is ~1e-11 against inputs of order 1 and the
-  #       policy is effectively blind to CSI. Re-tune lo/hi if you change geometry.
   obs_gain_norm: "db"
   obs_gain_db_lo: -125.0
   obs_gain_db_hi: -75.0
-  # Expose the per-group cascade response c_g = sum_k sum_{n in g} hr[k,n]*g[n]
-  # (relative magnitude + cos/sin of its phase, 3G extra observation dims).
-  # Without it the agent emits G RIS phases while observing no per-group or phase
-  # information at all, so theta_g is open-loop and no channel impairment can
-  # degrade it. Built from the *observed* channel, so CSI error/delay reach it.
   obs_group_features: true
 
 mec:
   F_max: 20.0e9        # total MEC CPU capacity [cycles/s]
   cycles_per_bit: 500  # omega: CPU cycles required per offloaded bit
   rho_out: 0.2         # output/input data ratio (downlink result size)
-  # MEC computation energy: kappa * f^2 per executed cycle, so
-  # E_comp = sum_k kappa f_k^2 omega b_k. 0.0 = transmit-only energy (the
-  # current metric), in which f_k affects latency only and never EE.
-  # ~1e-28 makes computation ~76% of the energy; see README.
   compute_energy_kappa: 0.0
+  result_queue: true
 
 queue:
-  # Mean task arrival [bits/slot] (exponential); must stay < per-user capacity so
-  # queues are stabilizable. Reduced 3.0e5 -> 1.5e5 together with
-  # geometry.ris_steering: with a physical array response the cascade no longer
-  # combines coherently by default, so the per-user capacity drops and 3.0e5 is
-  # no longer drainable -- the queue-aware DPP baseline's backlog runs away to
-  # 2.6e6 bits (vs 4.9e5 under the old model). At 1.5e5 the queue statistics
-  # match the pre-fix regime almost exactly (mean 2.45e5 vs 2.34e5).
   arrival_mean_bits: 1.5e5
   arrival_model: "exponential"  # {exponential}
   q_norm: 2.0e6        # queue normalization constant for observations/rewards
@@ -99,30 +71,19 @@ hierarchy:
   H: 50                # meta-controller (strategist) period in slots
   lambda_E: 1.0        # latency<->EE trade-off weight (swept for Pareto, R3.2)
   objective: "dpp"     # reward objective: {ee_latency, dinkelbach, dpp}
-  # Lyapunov drift-plus-penalty knob: reward = -drift + V*(EE term) - V*lambda_E*L,
-  # so LARGER V weights efficiency and SMALLER V weights queue stability.
-  # The theory gives an O(1/V) optimality gap against an O(V) queue bound;
-  # experiments/run_all.py --only lyapunov traces that curve empirically.
-  dpp_V: 1.0
-  # Drift normalization. "queue_arrival" scales backlog by q_norm and
-  # unserved arrivals by the mean arrival, so drift and the V*EE term are
-  # commensurate. "legacy" divides by q_norm twice, leaving drift 52-2400x
-  # smaller than the EE term -- backlog growth is then unpenalized and the
-  # agent maximizes bits/energy by under-serving its users.
+  dpp_V: 0.03
   drift_norm: "queue_arrival"
-  # How the strategist's RIS-amplitude action is mapped to a_g.
-  # "feasible": onto [0, a_feasible], the largest uniform amplitude the RIS
-  #   power budget admits (1.71 here). "raw": onto [0, ris_amp_max] (=6.0),
-  #   where 71% of the range is clipped to the same saturated outcome and
-  #   PPO initializes inside that dead zone -- the strategist then adds
-  #   exactly 0.0% over a fixed default, because it never sees a gradient.
   amp_action_scale: "feasible"
+  dl_power_action: "db"
+  dl_power_range_db: 60.0
+
+baselines:
+  dpp_mode: "normalized"
+  dpp_V: 0.3
+  dpp_amp_levels: 8        # uniform RIS amplitudes searched per slot, in (0, a_feasible]
+  ifp_mode: "full"
 
 vec:
-  # Number of independent worlds advanced per numpy call / policy forward pass.
-  # This is the throughput knob: the env's per-slot cost is dominated by fixed
-  # Python/numpy dispatch overhead, so n_envs worlds cost barely more than one.
-  # n_envs: 1 recovers the original single-world behaviour exactly.
   n_envs: 32
   meta_n_envs: 32        # worlds for the strategist (its inner H-loop is the hot path)
   scale_batch: true      # scale PPO batch_size with n_envs -> same gradient steps
@@ -131,17 +92,8 @@ vec:
 
 training:
   seed: 0
-  # Split of the environment-interaction budget between the two levels.
-  # One tactician step = one gradient transition; one strategist step costs
-  # H slots for one transition. Measured at K=8 (README): HDRL EE rises
-  # steeply with the tactician budget and the strategist adds ~8% once it
-  # can learn at all, so most of the budget belongs to the fast level.
   low_timesteps: 1000000   # tactician pre-training
   meta_timesteps: 9000     # strategist (META-steps; 9000*H = 450k env slots)
-  # Flat-PPO baseline, matched to the hierarchy's ENVIRONMENT-interaction
-  # budget low_timesteps + H*meta_timesteps = 1000000 + 50*9000 = 1450000.
-  # Anything less and the flat agent loses on experience rather than on
-  # architecture. experiments/run_all.py derives this per profile.
   flat_timesteps: 1450000
   ppo:
     n_steps: 512

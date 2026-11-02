@@ -29,6 +29,11 @@ REFERENCE_PINS = {
     # physics (check_steering), with its companion link-budget parameter
     "geometry.ris_steering": False,
     "hierarchy.drift_norm": "legacy",
+    "hierarchy.dpp_V": 1.0,
+    "baselines.dpp_mode": "legacy",
+    "baselines.ifp_mode": "legacy",
+    "mec.result_queue": False,
+    "hierarchy.dl_power_action": "linear",
     "queue.arrival_mean_bits": 3.0e5,
 }
 

@@ -34,8 +34,9 @@ def dims(cfg) -> dict:
     K, N, G = int(cfg["system"]["K"]), int(cfg["system"]["N"]), int(cfg["system"]["G"])
     assert N % G == 0, "N must be divisible by G"
     grp = 3 * G if bool(cfg["channel"].get("obs_group_features", True)) else 0
+    rq = K if bool(cfg["mec"].get("result_queue", True)) else 0
     return {"K": K, "N": N, "G": G,
-            "obs": 4 * K + 1 + grp, "act": 2 * K + 1 + G,
+            "obs": 4 * K + 1 + grp + rq, "act": 2 * K + 1 + G,
             "meta_obs": 3 * K + 2, "meta_act": 2 * K + G}
 
 

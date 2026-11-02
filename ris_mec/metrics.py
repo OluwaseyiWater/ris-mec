@@ -31,12 +31,22 @@ def summarize(infos: list, K: int, tau: float, arrival_mean: float) -> dict:
     thr_total = tot_bits / n                         # served bits per slot
     thr_user = thr_total / max(int(K), 1)            # per-UE, to match q_user
     w_queue = (q_user / thr_user * tau) if thr_user > 0 else float("inf")
+    # Waiting in the owed-result queue before the downlink returns the result,
+    # again by Little's law per UE. If nothing was ever delivered the true wait is
+    # unbounded; the horizon is reported instead as a finite lower bound.
+    w_result = 0.0
+    if "rqueue_mean" in df:
+        rq_user = float(df["rqueue_mean"].mean())
+        dlv_user = float(df["dl_delivered"].sum()) / n / max(int(K), 1)
+        if rq_user > 0:
+            w_result = rq_user / dlv_user * tau if dlv_user > 0 else n * tau
     lat_service = float(df["latency"].mean())
     offered = int(K) * float(arrival_mean)
     return {
         "latency": lat_service,
         "delay_queue": w_queue,
-        "delay_total": lat_service + w_queue,
+        "delay_result": w_result,
+        "delay_total": lat_service + w_queue + w_result,
         "throughput": thr_total,
         "served_ratio": thr_total / offered if offered > 0 else float("nan"),
         "ee_mbit_j": float(tot_bits / max(tot_energy, 1e-12) / 1e6),
@@ -45,6 +55,11 @@ def summarize(infos: list, K: int, tau: float, arrival_mean: float) -> dict:
         "energy": tot_energy,
         "a_mean": float(df["a_mean"].mean()) if "a_mean" in df else float("nan"),
         "p_ris": float(df["p_ris"].mean()) if "p_ris" in df else float("nan"),
+        # Fraction of owed results actually returned on the downlink, and the
+        # downlink power spent doing it. See BatchedRISMEC.step.
+        "dl_delivered_ratio": (float(df["dl_delivered"].sum() / max(df["dl_owed"].sum(), 1e-30))
+                               if "dl_owed" in df else float("nan")),
+        "dl_power": float(df["dl_power"].mean()) if "dl_power" in df else float("nan"),
     }
 
 

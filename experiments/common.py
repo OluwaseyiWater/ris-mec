@@ -181,7 +181,7 @@ def config_fingerprint() -> str:
         return hashlib.sha256(f.read()).hexdigest()[:16]
 
 
-def write_provenance(profile: str, studies):
+def write_provenance(profile: str, studies, v_by_method=None):
     """Record what produced results/, so the paper can detect stale numbers.
 
     Timestamps are not enough: restoring results from version control, or editing
@@ -199,6 +199,8 @@ def write_provenance(profile: str, studies):
         "profile": profile,
         "studies": list(studies),
         "config_sha": config_fingerprint(),
+        # Operating points chosen by --auto-v; empty = the config's own V values.
+        "v_by_method": dict(v_by_method or {}),
         "git_commit": commit,
         "utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     })

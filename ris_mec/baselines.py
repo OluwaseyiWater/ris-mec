@@ -22,7 +22,7 @@ standard for Lyapunov/FP methods) and are evaluated with the same metric code.
 from __future__ import annotations
 import numpy as np
 
-from .env import RISMECEnv
+from .env import RISMECEnv, CARRY
 from .metrics import summarize
 
 
@@ -142,7 +142,7 @@ def run_AO(cfg, seed=0, steps=1000):
         env.f = np.full(env.K, env.F_max / env.K)
         a = rng.uniform(-0.5, 0.5, env.action_space.shape[0])
         _, _, done, _, info = env.step(a); infos.append(info)
-        if done: env.reset()
+        if done: env.reset(options=CARRY)
     return summarize(infos, env.K, env.tau, env.arrival_mean)
 
 
@@ -153,7 +153,7 @@ def run_SCA(cfg, seed=0, steps=1000):
         env.f = np.full(env.K, env.F_max / env.K)
         a = np.zeros(env.action_space.shape[0])
         _, _, done, _, info = env.step(a); infos.append(info)
-        if done: env.reset()
+        if done: env.reset(options=CARRY)
     return summarize(infos, env.K, env.tau, env.arrival_mean)
 
 
@@ -165,7 +165,7 @@ def run_FP(cfg, seed=0, steps=1000):
         env.f = np.full(env.K, env.F_max / env.K)
         a = rng.uniform(-1, 1, env.action_space.shape[0])
         _, _, done, _, info = env.step(a); infos.append(info)
-        if done: env.reset()
+        if done: env.reset(options=CARRY)
     return summarize(infos, env.K, env.tau, env.arrival_mean)
 
 
@@ -232,7 +232,7 @@ def run_IFP(cfg, seed=0, steps=1000, inner=6):
         env.set_strategy(a_gains=np.full(env.G, a))
         act = _action(env, p, p_dl, beta, theta_g)
         _, _, done, _, info = env.step(act); infos.append(info)
-        if done: env.reset()
+        if done: env.reset(options=CARRY)
     return summarize(infos, env.K, env.tau, env.arrival_mean)
 
 
@@ -258,7 +258,7 @@ def _run_IFP_legacy(cfg, seed=0, steps=1000, inner=6):
             p = np.clip(1.0 / np.maximum(grad_scale, 1e-9), 0, env.Pk_max)
         a = _action(env, p, env.PBS_max, beta, theta_g)
         _, _, done, _, info = env.step(a); infos.append(info)
-        if done: env.reset()
+        if done: env.reset(options=CARRY)
     return summarize(infos, env.K, env.tau, env.arrival_mean)
 
 
@@ -337,7 +337,7 @@ def run_DPP(cfg, seed=0, steps=1000):
         env.set_strategy(a_gains=np.full(env.G, a))
         act = _action(env, p, p_dl, beta, theta_g)
         _, _, done, _, info = env.step(act); infos.append(info)
-        if done: env.reset()
+        if done: env.reset(options=CARRY)
     return summarize(infos, env.K, env.tau, env.arrival_mean)
 
 
@@ -368,7 +368,7 @@ def _run_DPP_legacy(cfg, seed=0, steps=1000):
         p = grid[np.argmax(objective, axis=1)]
         a = _action(env, p, env.PBS_max, beta, theta_g)
         _, _, done, _, info = env.step(a); infos.append(info)
-        if done: env.reset()
+        if done: env.reset(options=CARRY)
     return summarize(infos, env.K, env.tau, env.arrival_mean)
 
 

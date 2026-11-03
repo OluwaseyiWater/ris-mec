@@ -11,7 +11,7 @@ instead of ``model.predict`` -- which is semantically identical.
 from __future__ import annotations
 import numpy as np
 
-from .env import RISMECEnv
+from .env import RISMECEnv, CARRY
 from .hierarchy import MetaManager
 from .vec_env import FrozenPolicy
 from .flat import FlatEnv
@@ -31,7 +31,7 @@ def evaluate_hdrl(cfg, low, meta, seed=0, steps=1000, enable_ris=True) -> dict:
         obs, _, done, _, info = env.step(low_pi(obs[None, :])[0])
         infos.append(info)
         if done:
-            obs, _ = env.reset()
+            obs, _ = env.reset(options=CARRY)
     return summarize(infos, env.K, env.tau, env.arrival_mean)
 
 
@@ -44,6 +44,6 @@ def evaluate_flat(cfg, flat, seed=0, steps=1000) -> dict:
         obs, _, done, _, info = fenv.step(pi(obs[None, :])[0])
         infos.append(info)
         if done:
-            obs, _ = fenv.reset()
+            obs, _ = fenv.reset(options=CARRY)
     e = fenv.env
     return summarize(infos, e.K, e.tau, e.arrival_mean)

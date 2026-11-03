@@ -33,6 +33,8 @@ REFERENCE_PINS = {
     "baselines.dpp_mode": "legacy",
     "baselines.ifp_mode": "legacy",
     "mec.result_queue": False,
+    "mec.dl_power_floor": "none",
+    "active_ris.passive_model": "unit_gain",
     "hierarchy.dl_power_action": "linear",
     "queue.arrival_mean_bits": 3.0e5,
 }

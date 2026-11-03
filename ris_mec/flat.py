@@ -38,7 +38,7 @@ class FlatEnv(gym.Env):
         return np.concatenate([self.env._obs(), self.mgr.meta_obs()]).astype(np.float32)
 
     def reset(self, *, seed=None, options=None):
-        self.env.reset(seed=seed)
+        self.env.reset(seed=seed, options=options)
         return self._obs(), {}
 
     def step(self, action):

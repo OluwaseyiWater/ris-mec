@@ -43,6 +43,10 @@ from .channels import ChannelView, quantize_phase, dbm_to_watt, db_to_lin
 from .core import BatchedRISMEC
 from .objectives import RewardObjective, StepStats
 
+# Evaluation is one continuing run: episode boundaries reset the clock but carry
+# the backlogs over (see BatchedRISMEC.reset), so the served fraction is exact.
+CARRY = {"keep_queues": True}
+
 # Attributes that are simply forwarded from the batched core.
 _FORWARD = (
     "K", "N", "G", "M", "tau", "max_steps", "B", "n0", "sigma_ris_psd",
@@ -130,7 +134,9 @@ class RISMECEnv(gym.Env):
 
     # ================================================================== #
     def reset(self, *, seed=None, options=None):
-        obs = self.core.reset(seed=seed)
+        """``options={"keep_queues": True}`` carries the backlogs over (evaluation)."""
+        keep = bool((options or {}).get("keep_queues", False))
+        obs = self.core.reset(seed=seed, keep_queues=keep)
         if seed is not None:
             self.chan = ChannelView(self.core.chan, 0)
         return obs[0], {}

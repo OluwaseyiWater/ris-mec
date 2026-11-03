@@ -23,12 +23,14 @@ power:
   ris_amp_pa: 5.0e-3       # p_a: dynamic amplification coefficient [W]
   ris_power_budget: 2.0    # P_RIS_max: total RIS power budget [W]
   ris_amp_max: 6.0         # a_g upper bound (max amplitude gain, >1 = amplify)
-  ris_out_power_max: 0.05  # P_out,max: per-element output-power cap [W] 
+  ris_out_power_max: 0.05  # P_out,max: per-element output-power cap [W]
+  ris_passive_pc: 1.0e-3   # passive RIS: phase-shifter power per element [W] (no amplifier)
 
 active_ris:
   sigma_ris_psd_dbm_hz: -160.0   # active-RIS amplifier noise PSD [dBm/Hz] (~14 dB above thermal)
   enable_amplification: true
   a_init: 2.0                    # default group amplitude gain when strategist not set
+  passive_model: "passive"       # no-amplification ablation: {passive (no p_a, no amp noise), unit_gain (old)}
 
 geometry:                  # reference-distance pathloss geometry (meters), RIS-standard
   fc_ghz: 3.5              # carrier frequency [GHz]
@@ -61,6 +63,7 @@ mec:
   rho_out: 0.2         # output/input data ratio (downlink result size)
   compute_energy_kappa: 0.0
   result_queue: true
+  dl_power_floor: "clear"   # {clear: each slot, at least the power that returns all pending results; none}
 
 queue:
   arrival_mean_bits: 1.5e5

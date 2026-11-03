@@ -65,6 +65,16 @@ class BatchedRISMEC:
         self.sigma_ris_psd = dbm_to_watt(float(cfg["active_ris"]["sigma_ris_psd_dbm_hz"]))
         self.enable_amp = bool(cfg["active_ris"].get("enable_amplification", True))
         self.a_init = float(cfg["active_ris"].get("a_init", 1.0))
+        # What "no amplification" means. "passive": a passive RIS -- unit gain, no
+        # amplifier noise, and only the per-element phase-shifter power. The old
+        # "unit_gain" kept the active hardware locked at a = 1, still charged the
+        # amplifier term p_a and still injecting amplifier noise, which is not a
+        # passive surface and made "active vs passive" a comparison against a
+        # handicapped baseline.
+        self.passive_model = str(cfg["active_ris"].get("passive_model", "passive"))
+        if self.passive_model not in ("passive", "unit_gain"):
+            raise ValueError(f"unknown active_ris.passive_model '{self.passive_model}'")
+        self._passive = not self.enable_amp       # also set by apply_meta(enable_ris=False)
 
         # Power model
         p = cfg["power"]
@@ -73,6 +83,7 @@ class BatchedRISMEC:
         self.P_ris_budget = float(p["ris_power_budget"])
         self.a_max = float(p["ris_amp_max"])
         self.P_out_max = float(p["ris_out_power_max"])
+        self.pc_passive = float(p.get("ris_passive_pc", self.pc))   # phase-shifter only
 
         # MEC
         m = cfg["mec"]
@@ -89,6 +100,15 @@ class BatchedRISMEC:
         # dynamic-power model), i.e. E_comp = sum_k kappa * f_k^2 * omega * b_k.
         # 0.0 reproduces the transmit-only energy metric.
         self.kappa_c = float(m.get("compute_energy_kappa", 0.0))
+        # Result return as a constraint. With the result queue in the drift alone,
+        # the learned agents still starved the downlink once V was large enough
+        # for V * efficiency to dominate the drift (79% of results returned at
+        # V=0.3, 5% at V=10). "clear" enforces return per slot for every
+        # controller alike: the BS transmits at least the power that delivers all
+        # pending results this slot, capped at P_max. "none" = no floor.
+        self.dl_floor = str(m.get("dl_power_floor", "clear"))
+        if self.dl_floor not in ("clear", "none"):
+            raise ValueError(f"unknown mec.dl_power_floor '{self.dl_floor}'")
 
         # Queue
         q = cfg["queue"]
@@ -213,7 +233,16 @@ class BatchedRISMEC:
             a_ctrl = (a[:, 2 * K:2 * K + G] + 1) / 2.0 * self.a_scale  # [0, a_scale]
         else:
             a_ctrl = np.ones((E, G))                                  # passive ablation
+        passive = (not enable_ris) or (not self.enable_amp)
+        if passive != self._passive:
+            self._passive = passive
+            self._strategy_version += 1                               # invalidate memo
         self.set_strategy(alpha=alpha, f=f, a_gains=a_ctrl)
+
+    @property
+    def true_passive(self):
+        """Unit gain with no amplifier: no p_a power and no amplifier noise."""
+        return self._passive and self.passive_model == "passive"
 
     # ================================================================== #
     #  Physics helpers (vectorized over worlds)
@@ -229,6 +258,14 @@ class BatchedRISMEC:
         key = (self._strategy_version, self.chan.version)
         if self._amp_key == key and self._amp_memo is not None:
             return self._amp_memo
+
+        if self.true_passive:
+            # A passive element reflects at unit gain and cannot exceed its input,
+            # so neither the output-power cap nor the amplifier budget applies.
+            a = np.ones((self.n_envs, self.G))
+            p_ris = np.full(self.n_envs, self.N * self.pc_passive)
+            self._amp_key, self._amp_memo = key, (a, p_ris)
+            return a, p_ris
 
         # Incident signal power per element ~ sum_k P_k^ul |hr_{k,n}|^2 ; use max
         # power as a worst-case envelope for the actuator constraint, per group.
@@ -263,20 +300,35 @@ class BatchedRISMEC:
 
     def _noise_floors(self, a_gains):
         """Uplink (at BS) and downlink (per UE) amplifier-noise floors [W/Hz]."""
+        if self.true_passive:
+            return np.zeros(self.n_envs), np.zeros((self.n_envs, self.K))
         a2 = a_gains ** 2                                                 # (E,G)
         ul = self.sigma_ris_psd * np.einsum('eg,eg->e', a2, self.chan.zeta_g())
         dl = self.sigma_ris_psd * np.einsum('eg,ekg->ek', a2, self.chan.xi_gk())
         return ul, dl
 
     # ================================================================== #
-    def reset(self, seed=None):
+    def reset(self, seed=None, keep_queues: bool = False):
+        """Start a new episode.
+
+        :param keep_queues: carry the task and result backlogs over (evaluation).
+            Training episodes are 200 slots; resetting the queues at every
+            boundary during evaluation discards each controller's working
+            backlog and re-runs its warm-up, so the served fraction ended up
+            measuring how much backlog a policy carries rather than whether it
+            keeps up. The initial-queue draw still happens, so the RNG stream --
+            and hence every channel and arrival -- is identical either way.
+        """
         E = self.n_envs
         if seed is not None:
             self.rng = np.random.default_rng(seed)
             self.chan = ChannelModel(self.cfg, self.rng, n_envs=E)
+        carried = (self.queues, self.rqueues) if keep_queues else None
         self.t = 0
         self.queues = self.rng.exponential(self.arrival_mean, size=(E, self.K))
         self.rqueues = np.zeros((E, self.K))
+        if carried is not None:
+            self.queues, self.rqueues = carried
         self.alpha = np.full((E, self.K), 0.5)
         self.f = np.full((E, self.K), self.F_max / self.K)
         self.a_gains = np.full((E, self.G), self.a_init if self.enable_amp else 1.0)
@@ -316,12 +368,21 @@ class BatchedRISMEC:
         n_ul = W * (self.n0 + ul_ris_psd[:, None])
         n_dl = W * (self.n0 + dl_ris_psd)
         R_ul = W * np.log2(1 + ul_p * h2 / np.maximum(n_ul, 1e-30))
-        R_dl = W * np.log2(1 + dl_p[:, None] * h2 / np.maximum(n_dl, 1e-30))
 
         # --- offloading, latency (bits limited by rate over the slot) ---
         demand_ul = self.alpha * self.queues
         bits_ul = np.minimum(demand_ul, R_ul * self.tau)
         owed = self.rho_out * bits_ul                                     # (E,K)
+        if self.dl_floor == "clear":
+            # Least P_dl with W_k log2(1 + P h2_k / n_k) tau >= pending_k for every
+            # UE, i.e. P >= max_k (2^(pending_k / (W_k tau)) - 1) n_k / h2_k.
+            need = (self.rqueues + owed) if self.result_queue else \
+                self.rho_out * self.alpha * self.queues
+            x = np.minimum(need / np.maximum(W * self.tau, 1e-30), 60.0)
+            p_need = np.expm1(x * np.log(2.0)) * n_dl / np.maximum(h2, 1e-300)
+            p_need = (1.0 + 1e-6) * np.where(need > 0, p_need, 0.0).max(axis=1)
+            dl_p = np.minimum(np.maximum(dl_p, p_need), self.PBS_max)
+        R_dl = W * np.log2(1 + dl_p[:, None] * h2 / np.maximum(n_dl, 1e-30))
         if self.result_queue:
             pending = self.rqueues + owed
             bits_dl = np.minimum(pending, R_dl * self.tau)

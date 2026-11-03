@@ -42,13 +42,22 @@ def summarize(infos: list, K: int, tau: float, arrival_mean: float) -> dict:
             w_result = rq_user / dlv_user * tau if dlv_user > 0 else n * tau
     lat_service = float(df["latency"].mean())
     offered = int(K) * float(arrival_mean)
+    # Served fraction of the bits that actually entered the system. Evaluation is
+    # one continuing run (queues carried across episode boundaries), so bits are
+    # conserved: initial backlog + arrivals = served + final backlog, exactly,
+    # because a slot never offloads more than its queue holds. Dividing by the
+    # nominal K*lambda instead mixed in the seed-to-seed noise of exponential
+    # arrivals, which was as large as the 1% margin a feasibility cut tests.
+    q_end = int(K) * float(df["queue_mean"].iloc[-1]) if len(df) else 0.0
+    served = tot_bits / (tot_bits + q_end) if tot_bits + q_end > 0 else float("nan")
     return {
         "latency": lat_service,
         "delay_queue": w_queue,
         "delay_result": w_result,
         "delay_total": lat_service + w_queue + w_result,
         "throughput": thr_total,
-        "served_ratio": thr_total / offered if offered > 0 else float("nan"),
+        "served_ratio": served,
+        "served_nominal": thr_total / offered if offered > 0 else float("nan"),
         "ee_mbit_j": float(tot_bits / max(tot_energy, 1e-12) / 1e6),
         "queue_mean": q_user,
         "queue_p95": float(df["queue_mean"].quantile(0.95)),
